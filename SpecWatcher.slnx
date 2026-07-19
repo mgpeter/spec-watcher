@@ -1,0 +1,5 @@
+<Solution>
+  <Folder Name="/SpecWatcher.CLI/">
+    <Project Path="SpecWatcher.CLI/SpecWatcher.Console.csproj" />
+  </Folder>
+</Solution>
