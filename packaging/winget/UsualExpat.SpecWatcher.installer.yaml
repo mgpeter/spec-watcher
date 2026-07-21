@@ -12,9 +12,9 @@ NestedInstallerFiles:
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/mgpeter/spec-watcher/releases/download/v1.0.0/spec-watcher-1.0.0-win-x64.zip
-    InstallerSha256: CBD58F62A008CCA59E7C3E78438533936929EA8A204E0767438F3A895A9990C5
+    InstallerSha256: 3F1DEAADE6797638E4765B14875B3348501A66C8BDEDC8935E2F00828A18AC39
   - Architecture: arm64
     InstallerUrl: https://github.com/mgpeter/spec-watcher/releases/download/v1.0.0/spec-watcher-1.0.0-win-arm64.zip
-    InstallerSha256: D1BE30A6C3951F094C90471815BECE9B5D2BEDA4333099541B0EC69A4761648E
+    InstallerSha256: 475B53EF1D4CAF9FC1ADA244580D4EFDBB33F9F772E55394D92C168C0F5B9BD0
 ManifestType: installer
 ManifestVersion: 1.9.0
