@@ -2,4 +2,5 @@
   <Folder Name="/SpecWatcher.CLI/">
     <Project Path="SpecWatcher.CLI/SpecWatcher.Console.csproj" />
   </Folder>
+  <Project Path="SpecWatcher.Tests/SpecWatcher.Tests.csproj" />
 </Solution>

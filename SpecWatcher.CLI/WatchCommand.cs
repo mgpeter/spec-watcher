@@ -71,7 +71,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
             if (AnsiConsole.Profile.Width < 100)
                 AnsiConsole.Profile.Width = 120;
 
-            var result = await SpecScanner.ScanAsync(settings.ResolvedSpecsDir, DateTimeOffset.Now);
+            var result = await SpecScanner.ScanAsync(settings.ResolvedSpecsDir, DateTimeOffset.Now, settings.ToDriftOptions());
             if (result.Error is { } err) AnsiConsole.MarkupLine($"[red]{Markup.Escape(err)}[/]");
             AnsiConsole.Write(BuildStaticTable(result));
             return result.Error is null ? 0 : 1;
@@ -387,7 +387,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         _isScanning = true;
         try
         {
-            var result = await SpecScanner.ScanAsync(settings.ResolvedSpecsDir, DateTimeOffset.Now, ct);
+            var result = await SpecScanner.ScanAsync(settings.ResolvedSpecsDir, DateTimeOffset.Now, settings.ToDriftOptions(), ct);
             Volatile.Write(ref _latest, result);
         }
         finally

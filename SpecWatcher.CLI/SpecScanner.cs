@@ -10,7 +10,8 @@ public static class SpecScanner
     /// contains a spec.md (or, leniently, a spec-lite.md / tasks.md). Newest folder first.
     /// A missing directory is reported via <see cref="ScanResult.Error"/> rather than throwing.
     /// </summary>
-    public static Task<ScanResult> ScanAsync(string specsDir, DateTimeOffset now, CancellationToken ct = default) =>
+    public static Task<ScanResult> ScanAsync(
+        string specsDir, DateTimeOffset now, DriftOptions driftOptions = default, CancellationToken ct = default) =>
         Task.Run(() =>
         {
             if (!Directory.Exists(specsDir))
@@ -27,7 +28,9 @@ public static class SpecScanner
                 foreach (var folder in folders)
                 {
                     ct.ThrowIfCancellationRequested();
-                    rows.Add(SpecParser.Parse(folder));
+                    var row = SpecParser.Parse(folder);
+                    var (state, reason) = DriftAnalyzer.Analyze(row, now, driftOptions);
+                    rows.Add(row with { Drift = state, DriftReason = reason });
                 }
 
                 return new ScanResult(rows.ToImmutable(), now);

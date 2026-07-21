@@ -12,6 +12,24 @@ public enum SpecStatus
 }
 
 /// <summary>
+/// Whether a spec's declared status contradicts its real checkbox progress, or it has gone idle.
+/// </summary>
+public enum DriftState
+{
+    /// <summary>No contradiction and (if enabled) not idle.</summary>
+    None,
+
+    /// <summary>Status claims more than the boxes show (e.g. Complete but not all checked).</summary>
+    Overstated,
+
+    /// <summary>Boxes are ahead of the status (e.g. all checked but still Planning/InProgress).</summary>
+    Understated,
+
+    /// <summary>An In-progress spec whose newest file is older than the idle threshold (opt-in).</summary>
+    Idle,
+}
+
+/// <summary>
 /// One parsed spec. Immutable so it can be published across threads safely.
 /// </summary>
 /// <param name="Name">Human title from <c>&gt; Spec:</c> (fallback: de-slugged folder name).</param>
@@ -24,6 +42,9 @@ public enum SpecStatus
 /// <param name="HasTasks">True when a tasks.md was found.</param>
 /// <param name="Folder">The raw folder slug (e.g. 2026-07-19-starter-check-selection).</param>
 /// <param name="FullPath">Absolute path to the spec folder (used by the detail view).</param>
+/// <param name="LastModifiedUtc">Newest file mtime among spec.md/tasks.md/spec-lite.md (null if none readable).</param>
+/// <param name="Drift">Whether the declared status contradicts checkbox reality or has gone idle.</param>
+/// <param name="DriftReason">One-line human explanation of the drift, or null when <see cref="Drift"/> is None.</param>
 public sealed record SpecRow(
     string Name,
     string Description,
@@ -34,7 +55,10 @@ public sealed record SpecRow(
     int Total,
     bool HasTasks,
     string Folder,
-    string FullPath)
+    string FullPath,
+    DateTimeOffset? LastModifiedUtc = null,
+    DriftState Drift = DriftState.None,
+    string? DriftReason = null)
 {
     /// <summary>Task completion as a fraction 0..1, or null when there are no tasks.</summary>
     public double? Progress => Total > 0 ? (double)Done / Total : null;

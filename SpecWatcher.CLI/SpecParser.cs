@@ -49,7 +49,32 @@ public static partial class SpecParser
         if (status == SpecStatus.Unknown && hasTasks && total > 0 && done == total)
             status = SpecStatus.Complete;
 
-        return new SpecRow(name, description, status, statusRaw.Trim(), created, done, total, hasTasks, folder, fullPath);
+        var lastModified = NewestWriteTimeUtc(folderPath);
+
+        // Parse stays time-agnostic: it never computes Drift (no `now`/options here). Drift is filled
+        // in by SpecScanner, which owns `now`. Leave Drift = None / DriftReason = null.
+        return new SpecRow(name, description, status, statusRaw.Trim(), created, done, total, hasTasks, folder, fullPath, lastModified);
+    }
+
+    /// <summary>Newest mtime among spec.md / tasks.md / spec-lite.md; null if none is readable.</summary>
+    private static DateTimeOffset? NewestWriteTimeUtc(string folderPath)
+    {
+        DateTimeOffset? newest = null;
+        foreach (var file in new[] { "spec.md", "tasks.md", "spec-lite.md" })
+        {
+            try
+            {
+                var path = Path.Combine(folderPath, file);
+                if (!File.Exists(path)) continue;
+                var t = new DateTimeOffset(File.GetLastWriteTimeUtc(path), TimeSpan.Zero);
+                if (newest is null || t > newest) newest = t;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Ignore unreadable files, exactly like TryRead.
+            }
+        }
+        return newest;
     }
 
     /// <summary>Read the full spec.md and tasks.md text for the detail view (fresh from disk).</summary>
