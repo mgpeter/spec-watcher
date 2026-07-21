@@ -11,6 +11,8 @@ with a `spec.md` (blockquote header), `spec-lite.md` (one-paragraph summary), an
 List columns: **Name · Status · Progress · Folder**. Press **Enter** (or click a row) to open the
 full spec + task checklist.
 
+![spec-watcher list view](docs/screenshots/specwatcher-main-screen.png)
+
 ## Requirements
 
 - .NET 10 SDK
@@ -77,6 +79,8 @@ when input is redirected, the app runs keyboard-only.
 - **Folder** — the raw folder slug, e.g. `2026-07-19-starter-check-selection`.
 - **Detail view** — renders the full `spec.md` (Overview, User Stories, Scope, …) plus the `tasks.md`
   checklist, loaded fresh from disk when opened.
+
+![spec-watcher detail view](docs/screenshots/specwatcher-spec-details.png)
 
 ## Behavior notes
 
