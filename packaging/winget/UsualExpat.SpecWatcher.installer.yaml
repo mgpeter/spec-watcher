@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
 # Portable-in-a-zip: each release asset is a zip containing a single `spec-watcher.exe`, so winget
 # installs a clean `spec-watcher` command alias regardless of the versioned asset name.
-# InstallerSha256 values are placeholders (all-zero) until a real release; the pipeline computes them.
+# Hashes below are the real SHA256 of the v1.0.0 GitHub Release zips.
 PackageIdentifier: UsualExpat.SpecWatcher
 PackageVersion: 1.0.0
 InstallerType: zip
@@ -12,9 +12,9 @@ NestedInstallerFiles:
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/mgpeter/spec-watcher/releases/download/v1.0.0/spec-watcher-1.0.0-win-x64.zip
-    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    InstallerSha256: CBD58F62A008CCA59E7C3E78438533936929EA8A204E0767438F3A895A9990C5
   - Architecture: arm64
     InstallerUrl: https://github.com/mgpeter/spec-watcher/releases/download/v1.0.0/spec-watcher-1.0.0-win-arm64.zip
-    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    InstallerSha256: D1BE30A6C3951F094C90471815BECE9B5D2BEDA4333099541B0EC69A4761648E
 ManifestType: installer
 ManifestVersion: 1.6.0
