@@ -1,0 +1,85 @@
+name: release
+
+# Cutting a release: bump the version, then push a tag `vX.Y.Z`.
+# This builds self-contained single-file binaries, publishes a GitHub Release,
+# and opens/updates the winget-pkgs PR for UsualExpat.SpecWatcher.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write        # create the GitHub Release
+
+jobs:
+  build:
+    name: build ${{ matrix.rid }}
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        rid: [win-x64, win-arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Derive version from tag
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # Self-contained + single-file so users need no .NET runtime. NOT trimmed:
+      # Spectre.Console.Cli binds commands via reflection and breaks when trimmed.
+      - name: Publish ${{ matrix.rid }}
+        shell: bash
+        run: |
+          dotnet publish SpecWatcher.CLI/SpecWatcher.Console.csproj \
+            -c Release -r ${{ matrix.rid }} --self-contained true \
+            -p:PublishSingleFile=true -p:Version=${{ steps.ver.outputs.version }} \
+            -o publish
+          # Zip the single exe so winget's nested-portable install yields a clean `spec-watcher` alias.
+          7z a "spec-watcher-${{ steps.ver.outputs.version }}-${{ matrix.rid }}.zip" ./publish/spec-watcher.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.rid }}
+          path: spec-watcher-*.zip
+          if-no-files-found: error
+
+  release:
+    name: github release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/spec-watcher-*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+  winget:
+    name: submit to winget
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      # Opens (or updates) the PR to microsoft/winget-pkgs from the release assets.
+      # First version note: the very first UsualExpat.SpecWatcher manifest is submitted MANUALLY
+      # from packaging/winget/ (it must establish InstallerType: portable). From the next version on,
+      # this job inherits that manifest and only bumps version/URL/hash. See docs/publishing-winget.md.
+      - name: winget-releaser
+        uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: UsualExpat.SpecWatcher
+          release-tag: ${{ github.ref_name }}
+          installers-regex: 'win-(x64|arm64)\.zip$'
+          token: ${{ secrets.WINGET_TOKEN }}

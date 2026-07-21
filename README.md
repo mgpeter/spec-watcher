@@ -13,7 +13,19 @@ full spec + task checklist.
 
 ![spec-watcher list view](docs/screenshots/specwatcher-main-screen.png)
 
+## Install
+
+```sh
+winget install UsualExpat.SpecWatcher
+```
+
+Installs a self-contained `spec-watcher` command (no .NET runtime required) published by Usual Expat
+Limited. See [docs/publishing-winget.md](docs/publishing-winget.md) for how releases are cut and how
+the winget package is maintained.
+
 ## Requirements
+
+Only to build from source:
 
 - .NET 10 SDK
 

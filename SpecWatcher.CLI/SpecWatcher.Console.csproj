@@ -8,6 +8,21 @@
     <RootNamespace>SpecWatcher</RootNamespace>
     <AssemblyName>spec-watcher</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- Overridable at publish time via -p:Version=X.Y.Z (CI derives it from the git tag). -->
+    <Version>1.0.0</Version>
+
+    <!-- Distribution metadata (surfaced in the exe + winget). -->
+    <Product>spec-watcher</Product>
+    <Company>Usual Expat Limited</Company>
+    <Authors>Usual Expat Limited</Authors>
+    <Description>A full-screen terminal dashboard that watches a repository's specs folder.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+
+    <!-- Single-file self-extract settings; only take effect when publishing with a RID + the flags
+         below (kept off the project so plain build/test don't require a RuntimeIdentifier). -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
   </PropertyGroup>
 
   <ItemGroup>
