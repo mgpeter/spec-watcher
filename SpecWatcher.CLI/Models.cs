@@ -45,6 +45,9 @@ public enum DriftState
 /// <param name="LastModifiedUtc">Newest file mtime among spec.md/tasks.md/spec-lite.md (null if none readable).</param>
 /// <param name="Drift">Whether the declared status contradicts checkbox reality or has gone idle.</param>
 /// <param name="DriftReason">One-line human explanation of the drift, or null when <see cref="Drift"/> is None.</param>
+/// <param name="IsCurrent">True when this spec matches the checked-out branch (or the last-touched fallback).</param>
+/// <param name="LastCommit">Most recent commit touching this spec folder, or null when git history has none.</param>
+/// <param name="RecentCommits">A small, newest-first slice of commits touching this folder (default = empty).</param>
 public sealed record SpecRow(
     string Name,
     string Description,
@@ -58,20 +61,42 @@ public sealed record SpecRow(
     string FullPath,
     DateTimeOffset? LastModifiedUtc = null,
     DriftState Drift = DriftState.None,
-    string? DriftReason = null)
+    string? DriftReason = null,
+    bool IsCurrent = false,
+    GitCommit? LastCommit = null,
+    ImmutableArray<GitCommit> RecentCommits = default)
 {
     /// <summary>Task completion as a fraction 0..1, or null when there are no tasks.</summary>
     public double? Progress => Total > 0 ? (double)Done / Total : null;
 }
 
+/// <summary>
+/// One commit read from the repo's local history, shaped for display. Immutable so it can be
+/// published across threads inside a <see cref="SpecRow"/>.
+/// </summary>
+/// <param name="Sha">The full 40-char commit hash.</param>
+/// <param name="ShortSha">The abbreviated hash (git <c>%h</c>).</param>
+/// <param name="When">Committer date (git <c>%cI</c>, strict ISO-8601).</param>
+/// <param name="Author">Author name (git <c>%an</c>).</param>
+/// <param name="Subject">Commit subject line (git <c>%s</c>).</param>
+public sealed record GitCommit(
+    string Sha, string ShortSha, DateTimeOffset When, string Author, string Subject);
+
 /// <summary>Raw spec.md / tasks.md text loaded on demand for the detail view.</summary>
 public sealed record SpecDetail(string? SpecText, string? TasksText);
 
 /// <summary>An immutable snapshot of one scan, published to the UI thread.</summary>
+/// <param name="Rows">The parsed spec rows.</param>
+/// <param name="CompletedAt">When the scan finished.</param>
+/// <param name="Error">A scan-level error message, or null on success.</param>
+/// <param name="GitAvailable">True when a git worktree + git binary were usable this scan.</param>
+/// <param name="CurrentBranch">Abbreviated current branch name, or null (detached / unavailable).</param>
 public sealed record ScanResult(
     ImmutableArray<SpecRow> Rows,
     DateTimeOffset CompletedAt,
-    string? Error = null)
+    string? Error = null,
+    bool GitAvailable = false,
+    string? CurrentBranch = null)
 {
     public static readonly ScanResult Empty =
         new(ImmutableArray<SpecRow>.Empty, DateTimeOffset.MinValue);

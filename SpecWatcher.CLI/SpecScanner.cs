@@ -33,7 +33,10 @@ public static class SpecScanner
                     rows.Add(row with { Drift = state, DriftReason = reason });
                 }
 
-                return new ScanResult(rows.ToImmutable(), now);
+                // Git enrichment runs off the UI thread here (inside Task.Run), after the folder parse.
+                // It degrades silently to the un-enriched rows when git/the repo is unavailable.
+                var (enriched, gitAvailable, branch) = GitEnricher.Enrich(rows.ToImmutable(), specsDir, ct);
+                return new ScanResult(enriched, now, GitAvailable: gitAvailable, CurrentBranch: branch);
             }
             catch (OperationCanceledException)
             {

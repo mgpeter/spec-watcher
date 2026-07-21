@@ -34,6 +34,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     private const int FlagW = 1;                            // drift/idle attention glyph
     private const int StatusW = 13;
     private const int ProgressW = 24;
+    private const int LastCommitW = 18;                     // "just now · a1b2c3d" — git only
     private const int FolderW = 34;
 
     private enum View { List, Detail }
@@ -349,7 +350,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         if (rowSlice >= _visibleRows) return null;
         var rowIdx = _scrollOffset + rowSlice;
         if (rowIdx < 0 || rowIdx >= data.Rows.Length) return null;
-        var plain = RowPlain(data.Rows[rowIdx], rowIdx == _selectedIndex, ComputeNameW(), _flagsVisible);
+        var plain = RowPlain(data.Rows[rowIdx], rowIdx == _selectedIndex, ComputeNameW(data.GitAvailable), _flagsVisible, data.GitAvailable);
         return (rowIdx, Math.Clamp(x, 0, plain.Length));
     }
 
@@ -358,10 +359,10 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     {
         if (_view == View.Detail) return _detailPlain;
         if (data.Rows.IsDefaultOrEmpty) return Array.Empty<string>();
-        var nameW = ComputeNameW();
+        var nameW = ComputeNameW(data.GitAvailable);
         var arr = new string[data.Rows.Length];
         for (var i = 0; i < arr.Length; i++)
-            arr[i] = RowPlain(data.Rows[i], i == _selectedIndex, nameW, _flagsVisible);
+            arr[i] = RowPlain(data.Rows[i], i == _selectedIndex, nameW, _flagsVisible, data.GitAvailable);
         return arr;
     }
 
@@ -492,7 +493,11 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
             ? $"[grey]{Markup.Escape(d.Folder)}[/]"
             : $"[grey]{Markup.Escape(s.ResolvedSpecsDir)}[/]";
 
-        return new Panel(new Markup($"[bold cyan]spec-watcher[/]  {where}   {state}"))
+        var branch = r.GitAvailable && r.CurrentBranch is { } b
+            ? $"   [grey]on[/] [gold1]◈ {Markup.Escape(b)}[/]"
+            : "";
+
+        return new Panel(new Markup($"[bold cyan]spec-watcher[/]  {where}   {state}{branch}"))
             .Expand().Border(BoxBorder.Rounded).BorderColor(Color.Blue);
     }
 
@@ -501,8 +506,9 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     // and lets Progress have a proper, non-collapsing width.
     private IRenderable BuildList(ScanResult r)
     {
-        var nameW = ComputeNameW();
-        var lines = new List<string>(_visibleRows + 1) { HeaderLine(nameW, _flagsVisible) };
+        var showCommit = r.GitAvailable;
+        var nameW = ComputeNameW(showCommit);
+        var lines = new List<string>(_visibleRows + 1) { HeaderLine(nameW, _flagsVisible, showCommit) };
 
         if (r.Rows.IsDefaultOrEmpty)
         {
@@ -519,13 +525,13 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
             {
                 if (sel is { } s && i >= s.Lo.Line && i <= s.Hi.Line)
                 {
-                    var plain = RowPlain(r.Rows[i], i == _selectedIndex, nameW, _flagsVisible);
+                    var plain = RowPlain(r.Rows[i], i == _selectedIndex, nameW, _flagsVisible, showCommit);
                     var (from, to) = LineSpan(s, i, plain.Length);
                     lines.Add(HighlightLine(plain, from, to));
                 }
                 else
                 {
-                    lines.Add(RowLine(r.Rows[i], i == _selectedIndex, nameW, _flagsVisible));
+                    lines.Add(RowLine(r.Rows[i], i == _selectedIndex, nameW, _flagsVisible, showCommit));
                 }
             }
         }
@@ -536,16 +542,17 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     // Fixed-width name column: fills the row after the other columns and their single-space gaps.
     // Leave a 1-column right margin so an exactly-full line can never wrap. When the attention layer
     // is on, the flag column (glyph + gap) takes an extra FlagW+1 cells.
-    private int ComputeNameW() => NameWidth(SafeWindowWidth(), _flagsVisible);
+    private int ComputeNameW(bool showCommit) => NameWidth(SafeWindowWidth(), _flagsVisible, showCommit);
 
-    internal static int NameWidth(int windowWidth, bool flagsVisible)
+    internal static int NameWidth(int windowWidth, bool flagsVisible, bool showCommit = false)
     {
         var width = Math.Max(60, windowWidth) - 1;
         var flagExtra = flagsVisible ? FlagW + 1 : 0;
-        return Math.Max(16, width - CaretW - StatusW - ProgressW - FolderW - 4 - flagExtra);
+        var commitExtra = showCommit ? LastCommitW + 1 : 0;
+        return Math.Max(16, width - CaretW - StatusW - ProgressW - FolderW - 4 - flagExtra - commitExtra);
     }
 
-    private static string HeaderLine(int nameW, bool flagsVisible)
+    internal static string HeaderLine(int nameW, bool flagsVisible, bool showCommit)
     {
         var text =
             Pad(" ", CaretW) + " " +
@@ -553,32 +560,60 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
             Pad("NAME", nameW) + " " +
             Pad("STATUS", StatusW) + " " +
             Pad("PROGRESS", ProgressW) + " " +
+            (showCommit ? Pad("LAST COMMIT", LastCommitW) + " " : "") +
             Pad("FOLDER", FolderW);
         return $"[grey62]{Markup.Escape(text)}[/]";
     }
 
-    private static string RowLine(SpecRow row, bool selected, int nameW, bool flagsVisible)
+    private static string RowLine(SpecRow row, bool selected, int nameW, bool flagsVisible, bool showCommit)
     {
-        var caret = selected ? "[aqua]❯[/]" : " ";
+        var caret = CaretMarkup(row, selected);
         var flag = flagsVisible ? FlagField(row.Drift).Markup + " " : "";
         var name = (selected ? "[bold white]" : "[grey85]") + Markup.Escape(Pad(row.Name, nameW)) + "[/]";
         var status = StatusColor(row.Status) + Markup.Escape(Pad(StatusText(row), StatusW)) + "[/]";
         var (progMarkup, progPlain) = ProgressField(row);
         var prog = progPlain.Length < ProgressW ? progMarkup + new string(' ', ProgressW - progPlain.Length) : progMarkup;
+        var commit = showCommit ? "[grey]" + Markup.Escape(Pad(LastCommitText(row), LastCommitW)) + "[/] " : "";
         var folder = "[grey42]" + Markup.Escape(Pad(row.Folder, FolderW)) + "[/]";
 
-        var line = $"{caret} {flag}{name} {status} {prog} {folder}";
+        var line = $"{caret} {flag}{name} {status} {prog} {commit}{folder}";
         return selected ? $"[on grey23]{line}[/]" : line;
     }
 
     /// <summary>Plain visible text of a list row, mirroring <see cref="RowLine"/>'s exact column layout.</summary>
-    private static string RowPlain(SpecRow row, bool selected, int nameW, bool flagsVisible)
+    internal static string RowPlain(SpecRow row, bool selected, int nameW, bool flagsVisible, bool showCommit)
     {
-        var caret = selected ? "❯" : " ";
+        var caret = CaretPlain(row, selected);
         var flag = flagsVisible ? FlagField(row.Drift).Plain + " " : "";
         var (_, progPlain) = ProgressField(row);
         var prog = progPlain.Length < ProgressW ? progPlain + new string(' ', ProgressW - progPlain.Length) : progPlain;
-        return $"{caret} {flag}{Pad(row.Name, nameW)} {Pad(StatusText(row), StatusW)} {prog} {Pad(row.Folder, FolderW)}";
+        var commit = showCommit ? Pad(LastCommitText(row), LastCommitW) + " " : "";
+        return $"{caret} {flag}{Pad(row.Name, nameW)} {Pad(StatusText(row), StatusW)} {prog} {commit}{Pad(row.Folder, FolderW)}";
+    }
+
+    // The caret column is shared by two independent states: the `◈ current` badge (branch match)
+    // takes precedence as a distinct accent glyph; a merely-selected row still shows `❯` and is also
+    // lit by the row-background highlight in RowLine, so no selection cue is lost.
+    private static string CaretMarkup(SpecRow row, bool selected) =>
+        row.IsCurrent ? "[gold1]◈[/]" : selected ? "[aqua]❯[/]" : " ";
+
+    private static string CaretPlain(SpecRow row, bool selected) =>
+        row.IsCurrent ? "◈" : selected ? "❯" : " ";
+
+    /// <summary>The Last-commit cell text: "<relative time> · <short sha>", or "—" when git has none.</summary>
+    private static string LastCommitText(SpecRow row) =>
+        row.LastCommit is { } c ? $"{RelativeTime(c.When, DateTimeOffset.Now)} · {c.ShortSha}" : "—";
+
+    /// <summary>Compact relative time: <c>just now / Nm / Nh / Nd / Nw ago</c>. Pure, so it is unit-testable.</summary>
+    internal static string RelativeTime(DateTimeOffset when, DateTimeOffset now)
+    {
+        var d = now - when;
+        if (d < TimeSpan.Zero) d = TimeSpan.Zero;
+        if (d.TotalSeconds < 45) return "just now";
+        if (d.TotalMinutes < 60) return $"{Math.Max(1, (int)d.TotalMinutes)}m ago";
+        if (d.TotalHours < 24) return $"{(int)d.TotalHours}h ago";
+        if (d.TotalDays < 7) return $"{(int)d.TotalDays}d ago";
+        return $"{(int)(d.TotalDays / 7)}w ago";
     }
 
     private static string StatusText(SpecRow row) => row.Status switch
@@ -793,6 +828,25 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         else
         {
             Add("[grey italic]no tasks.md[/]", "no tasks.md");
+        }
+
+        // Recent commits (git-aware). Omitted entirely when history has not touched this spec.
+        if (!row.RecentCommits.IsDefaultOrEmpty)
+        {
+            Add(string.Empty, string.Empty);
+            Add("[grey]──────── Recent commits ────────[/]", "──────── Recent commits ────────");
+            Add(string.Empty, string.Empty);
+
+            var now = DateTimeOffset.Now;
+            foreach (var c in row.RecentCommits)
+            {
+                var rel = RelativeTime(c.When, now);
+                var plainLine = $"{c.ShortSha}  {rel}  {c.Author} — {c.Subject}";
+                var styledLine =
+                    $"[gold1]{Markup.Escape(c.ShortSha)}[/]  [grey]{Markup.Escape(rel)}[/]  " +
+                    $"[aqua]{Markup.Escape(c.Author)}[/] [grey]—[/] {Markup.Escape(c.Subject)}";
+                Add(styledLine, plainLine);
+            }
         }
 
         return (styled.ToArray(), plain.ToArray());
