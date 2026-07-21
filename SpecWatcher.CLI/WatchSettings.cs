@@ -24,6 +24,11 @@ public sealed class WatchSettings : CommandSettings
     [DefaultValue(0)]
     public int DriftIdleDays { get; init; }
 
+    [CommandOption("--no-flags")]
+    [Description("Hide the drift/idle attention layer (glyphs, count, hint, jump).")]
+    [DefaultValue(false)]
+    public bool NoFlags { get; init; }
+
     /// <summary>The absolute specs directory (SpecsPath may itself be absolute).</summary>
     public string ResolvedSpecsDir =>
         Path.GetFullPath(Path.IsPathRooted(SpecsPath) ? SpecsPath : Path.Combine(RepoPath, SpecsPath));

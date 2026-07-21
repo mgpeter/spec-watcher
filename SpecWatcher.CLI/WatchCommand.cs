@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Text;
 using System.Text.RegularExpressions;
 using Spectre.Console;
@@ -30,6 +31,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
 
     // Fixed list column widths (visible cells). Name flexes to fill the rest.
     private const int CaretW = 1;
+    private const int FlagW = 1;                            // drift/idle attention glyph
     private const int StatusW = 13;
     private const int ProgressW = 24;
     private const int FolderW = 34;
@@ -44,6 +46,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
 
     // UI state (owned by the UI thread only).
     private View _view = View.List;
+    private bool _flagsVisible = true;                      // drift/idle attention layer on/off
     private int _selectedIndex;
     private int _scrollOffset;
     private int _visibleRows = 1;
@@ -64,6 +67,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     public override async Task<int> ExecuteAsync(CommandContext context, WatchSettings settings)
     {
         var caps = AnsiConsole.Profile.Capabilities;
+        _flagsVisible = !settings.NoFlags;
 
         // Non-interactive (piped / redirected / dumb terminal): one static table, then exit.
         if (!caps.Ansi || !caps.Interactive)
@@ -127,6 +131,9 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         {
             case InputKind.Key:
                 ClearSelection();
+                // Attention layer: `!` jumps between flagged rows, `F` toggles the whole layer.
+                if (evt.KeyChar == '!') { if (_view == View.List) JumpToNextFlagged(data); break; }
+                if (evt.Key == ConsoleKey.F) { _flagsVisible = !_flagsVisible; break; }
                 if (_view == View.List) HandleListKey(evt.Key, data);
                 else HandleDetailKey(evt.Key);
                 break;
@@ -234,6 +241,58 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         ClearSelection();
     }
 
+    // ---- drift attention layer (consumes the DriftState engine) ---------
+    //
+    // Single engine-contact seam: every read of drift goes through these helpers, so the layer
+    // degrades to an inert, blank state if the drift contract is ever absent or turned off.
+
+    private DriftState DriftOf(SpecRow row) => _flagsVisible ? row.Drift : DriftState.None;
+
+    private string? ReasonOf(SpecRow row) => _flagsVisible ? row.DriftReason : null;
+
+    private bool IsFlagged(SpecRow row) => DriftOf(row) != DriftState.None;
+
+    /// <summary>Attention glyph (styled markup + plain, both exactly <see cref="FlagW"/> wide) for a row.</summary>
+    internal static (string Markup, string Plain) FlagField(DriftState state) => state switch
+    {
+        DriftState.Overstated or DriftState.Understated => ("[yellow]⚠[/]", "⚠"),
+        DriftState.Idle => ("[grey]◍[/]", "◍"),
+        _ => (" ", " "),
+    };
+
+    /// <summary>Next flagged row index after <paramref name="current"/> (wrapping), or -1 when none.</summary>
+    internal static int NextFlaggedIndex(ImmutableArray<SpecRow> rows, int current)
+    {
+        if (rows.IsDefaultOrEmpty) return -1;
+        var n = rows.Length;
+        for (var step = 1; step <= n; step++)
+        {
+            var idx = ((current + step) % n + n) % n;
+            if (rows[idx].Drift != DriftState.None) return idx;
+        }
+        return -1;
+    }
+
+    private void JumpToNextFlagged(ScanResult data)
+    {
+        if (!_flagsVisible) return;
+        var idx = NextFlaggedIndex(data.Rows, _selectedIndex);
+        if (idx < 0) return;                               // nothing flagged → no-op
+        _selectedIndex = idx;
+        EnsureSelectedVisible(data.Rows.Length);
+    }
+
+    private int FlaggedCount(ScanResult data) =>
+        _flagsVisible && !data.Rows.IsDefaultOrEmpty ? data.Rows.Count(IsFlagged) : 0;
+
+    /// <summary>Trailing drift-reason segment for the detail footer, or empty when not flagged.</summary>
+    private string DetailReason(SpecRow row)
+    {
+        var reason = ReasonOf(row);
+        if (string.IsNullOrEmpty(reason)) return "";
+        return $"   {FlagField(row.Drift).Markup} [grey]{Markup.Escape(reason)}[/]";
+    }
+
     // ---- mouse text selection -------------------------------------------
 
     private void ClearSelection()
@@ -293,7 +352,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         if (rowSlice >= _visibleRows) return null;
         var rowIdx = _scrollOffset + rowSlice;
         if (rowIdx < 0 || rowIdx >= data.Rows.Length) return null;
-        var plain = RowPlain(data.Rows[rowIdx], rowIdx == _selectedIndex, ComputeNameW());
+        var plain = RowPlain(data.Rows[rowIdx], rowIdx == _selectedIndex, ComputeNameW(), _flagsVisible);
         return (rowIdx, Math.Clamp(x, 0, plain.Length));
     }
 
@@ -305,7 +364,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         var nameW = ComputeNameW();
         var arr = new string[data.Rows.Length];
         for (var i = 0; i < arr.Length; i++)
-            arr[i] = RowPlain(data.Rows[i], i == _selectedIndex, nameW);
+            arr[i] = RowPlain(data.Rows[i], i == _selectedIndex, nameW, _flagsVisible);
         return arr;
     }
 
@@ -446,7 +505,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     private IRenderable BuildList(ScanResult r)
     {
         var nameW = ComputeNameW();
-        var lines = new List<string>(_visibleRows + 1) { HeaderLine(nameW) };
+        var lines = new List<string>(_visibleRows + 1) { HeaderLine(nameW, _flagsVisible) };
 
         if (r.Rows.IsDefaultOrEmpty)
         {
@@ -463,13 +522,13 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
             {
                 if (sel is { } s && i >= s.Lo.Line && i <= s.Hi.Line)
                 {
-                    var plain = RowPlain(r.Rows[i], i == _selectedIndex, nameW);
+                    var plain = RowPlain(r.Rows[i], i == _selectedIndex, nameW, _flagsVisible);
                     var (from, to) = LineSpan(s, i, plain.Length);
                     lines.Add(HighlightLine(plain, from, to));
                 }
                 else
                 {
-                    lines.Add(RowLine(r.Rows[i], i == _selectedIndex, nameW));
+                    lines.Add(RowLine(r.Rows[i], i == _selectedIndex, nameW, _flagsVisible));
                 }
             }
         }
@@ -478,17 +537,22 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     }
 
     // Fixed-width name column: fills the row after the other columns and their single-space gaps.
-    // Leave a 1-column right margin so an exactly-full line can never wrap.
-    private int ComputeNameW()
+    // Leave a 1-column right margin so an exactly-full line can never wrap. When the attention layer
+    // is on, the flag column (glyph + gap) takes an extra FlagW+1 cells.
+    private int ComputeNameW() => NameWidth(SafeWindowWidth(), _flagsVisible);
+
+    internal static int NameWidth(int windowWidth, bool flagsVisible)
     {
-        var width = Math.Max(60, SafeWindowWidth()) - 1;
-        return Math.Max(16, width - CaretW - StatusW - ProgressW - FolderW - 4);  // 4 single-space gaps
+        var width = Math.Max(60, windowWidth) - 1;
+        var flagExtra = flagsVisible ? FlagW + 1 : 0;
+        return Math.Max(16, width - CaretW - StatusW - ProgressW - FolderW - 4 - flagExtra);
     }
 
-    private static string HeaderLine(int nameW)
+    private static string HeaderLine(int nameW, bool flagsVisible)
     {
         var text =
             Pad(" ", CaretW) + " " +
+            (flagsVisible ? Pad(" ", FlagW) + " " : "") +
             Pad("NAME", nameW) + " " +
             Pad("STATUS", StatusW) + " " +
             Pad("PROGRESS", ProgressW) + " " +
@@ -496,26 +560,28 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         return $"[grey62]{Markup.Escape(text)}[/]";
     }
 
-    private static string RowLine(SpecRow row, bool selected, int nameW)
+    private static string RowLine(SpecRow row, bool selected, int nameW, bool flagsVisible)
     {
         var caret = selected ? "[aqua]❯[/]" : " ";
+        var flag = flagsVisible ? FlagField(row.Drift).Markup + " " : "";
         var name = (selected ? "[bold white]" : "[grey85]") + Markup.Escape(Pad(row.Name, nameW)) + "[/]";
         var status = StatusColor(row.Status) + Markup.Escape(Pad(StatusText(row), StatusW)) + "[/]";
         var (progMarkup, progPlain) = ProgressField(row);
         var prog = progPlain.Length < ProgressW ? progMarkup + new string(' ', ProgressW - progPlain.Length) : progMarkup;
         var folder = "[grey42]" + Markup.Escape(Pad(row.Folder, FolderW)) + "[/]";
 
-        var line = $"{caret} {name} {status} {prog} {folder}";
+        var line = $"{caret} {flag}{name} {status} {prog} {folder}";
         return selected ? $"[on grey23]{line}[/]" : line;
     }
 
     /// <summary>Plain visible text of a list row, mirroring <see cref="RowLine"/>'s exact column layout.</summary>
-    private static string RowPlain(SpecRow row, bool selected, int nameW)
+    private static string RowPlain(SpecRow row, bool selected, int nameW, bool flagsVisible)
     {
         var caret = selected ? "❯" : " ";
+        var flag = flagsVisible ? FlagField(row.Drift).Plain + " " : "";
         var (_, progPlain) = ProgressField(row);
         var prog = progPlain.Length < ProgressW ? progPlain + new string(' ', ProgressW - progPlain.Length) : progPlain;
-        return $"{caret} {Pad(row.Name, nameW)} {Pad(StatusText(row), StatusW)} {prog} {Pad(row.Folder, FolderW)}";
+        return $"{caret} {flag}{Pad(row.Name, nameW)} {Pad(StatusText(row), StatusW)} {prog} {Pad(row.Folder, FolderW)}";
     }
 
     private static string StatusText(SpecRow row) => row.Status switch
@@ -591,11 +657,13 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
 
     private Panel BuildFooter(ScanResult r, WatchSettings s, bool mouse)
     {
+        var flagged = FlaggedCount(r);
+
         string left;
         if (_view == View.Detail)
         {
             left = _detailRow is { } d
-                ? $"{StatusBadge(d)}   {ProgressCell(d)}"
+                ? $"{StatusBadge(d)}   {ProgressCell(d)}{DetailReason(d)}"
                 : "[grey]detail[/]";
         }
         else if (r.Rows.IsDefaultOrEmpty)
@@ -610,6 +678,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
             left =
                 $"[bold]{r.Rows.Length}[/] specs   " +
                 $"[yellow]◐ {planning}[/]   [deepskyblue1]● {progress}[/]   [green]✔ {complete}[/]   " +
+                (flagged > 0 ? $"[orange1]⚠ {flagged}[/]   " : "") +
                 $"[grey]{_selectedIndex + 1}/{r.Rows.Length}[/]";
         }
 
@@ -621,9 +690,10 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         else
         {
             var mouseHint = mouse ? "[grey] · wheel · drag-copy[/]" : "";
+            var jumpHint = _view == View.List && flagged > 0 ? "   [bold]![/] [grey]flagged[/]" : "";
             keys = _view == View.Detail
                 ? $"[bold]↑↓[/] [grey]scroll[/]   [bold]Esc[/] [grey]back[/]{mouseHint}   [bold]Q[/] [grey]quit[/]"
-                : $"[bold]↑↓[/] [grey]nav[/]   [bold]Enter[/] [grey]open[/]{mouseHint}   [bold]R[/] [grey]refresh[/]   [bold]Q[/] [grey]quit[/]";
+                : $"[bold]↑↓[/] [grey]nav[/]   [bold]Enter[/] [grey]open[/]{jumpHint}{mouseHint}   [bold]R[/] [grey]refresh[/]   [bold]Q[/] [grey]quit[/]";
         }
 
         var grid = new Grid();
