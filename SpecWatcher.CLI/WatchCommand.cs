@@ -69,16 +69,13 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         var caps = AnsiConsole.Profile.Capabilities;
         _flagsVisible = !settings.NoFlags;
 
-        // Non-interactive (piped / redirected / dumb terminal): one static table, then exit.
-        if (!caps.Ansi || !caps.Interactive)
+        // Headless (one-shot) path: the user asked for it (--once / --format json|md / a gate flag) OR
+        // output is non-interactive (piped / redirected / dumb terminal). Scan once, emit the chosen
+        // format to stdout, and exit with the gate/exit-code contract. Never enters the TUI.
+        if (settings.WantsHeadless || !caps.Ansi || !caps.Interactive)
         {
-            if (AnsiConsole.Profile.Width < 100)
-                AnsiConsole.Profile.Width = 120;
-
             var result = await SpecScanner.ScanAsync(settings.ResolvedSpecsDir, DateTimeOffset.Now, settings.ToDriftOptions());
-            if (result.Error is { } err) AnsiConsole.MarkupLine($"[red]{Markup.Escape(err)}[/]");
-            AnsiConsole.Write(BuildStaticTable(result));
-            return result.Error is null ? 0 : 1;
+            return HeadlessRunner.Run(settings, result, Console.Out);
         }
 
         using var cts = new CancellationTokenSource();
@@ -705,7 +702,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
 
     // ---- static (non-interactive) table ---------------------------------
 
-    private static IRenderable BuildStaticTable(ScanResult r)
+    internal static IRenderable BuildStaticTable(ScanResult r)
     {
         var table = new Table().Expand().Border(TableBorder.Rounded).BorderColor(Color.Grey35);
         table.AddColumn(new TableColumn("[bold]Name[/]"));

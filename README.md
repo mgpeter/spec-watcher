@@ -44,6 +44,41 @@ dotnet build -c Release
 | `[REPO_PATH]` (position) | current directory    | Repository root to watch.                     |
 | `-s, --specs-path`       | `docs/specs`         | Specs folder, relative to the repo or absolute. |
 | `-i, --interval`         | `60`                 | Auto-rescan interval in seconds (min 1).      |
+| `--drift-idle-days`      | `0`                  | Flag In-progress specs untouched this many days as idle (`0` = off). |
+| `--no-flags`             | off                  | Hide the drift/idle attention layer.          |
+| `--once`                 | off                  | Scan once, emit the board to stdout, and exit. Never enters the TUI. |
+| `-f, --format`           | `table`              | Output format: `table`, `json`, or `md`. `json`/`md` imply `--once`. |
+| `--fail-on`              | none                 | Comma list of status keywords (`planning`, `in-progress`, `complete`, `unknown`); any matching spec fails the gate (exit `2`). |
+| `--min-progress`         | none                 | `0`–`100`; any spec with tasks below N% complete fails the gate (exit `2`). |
+
+## Headless & CI mode
+
+`--once` (or any of `--format json|md`, `--fail-on`, `--min-progress`) runs a single scan, writes the
+board to stdout in the chosen format, and exits — no TUI, no services, no persisted state. This is
+also what happens automatically when output is piped or the terminal is non-interactive.
+
+```sh
+# machine-readable snapshot you can pipe into jq, a dashboard, or a badge generator
+spec-watcher --once --format json
+
+# GitHub-flavored Markdown table for a wiki / PR description / status email
+spec-watcher --once --format md
+
+# CI gate: fail the run (exit 2) if any spec is still planning or in progress
+spec-watcher --fail-on planning,in-progress
+
+# CI gate: fail if any spec with tasks is below 80% complete
+spec-watcher --min-progress 80
+```
+
+**Exit codes:** `0` = scan succeeded and the gate passed (or none was set) · `1` = scan error
+(missing specs dir / IO) · `2` = gate failure (a `--fail-on` match or `--min-progress` shortfall).
+When a gate trips, the offending specs are listed in the output (and in the JSON `gate.violations`
+block), and the board is still emitted first.
+
+The `--format json` output is a **stable, versioned schema** (camelCase field names, kebab-case
+`status`): it is the single source of truth a README status badge or `spec-status.json` integration
+consumes, so it will only ever change additively.
 
 ## Keys & mouse
 
@@ -92,7 +127,8 @@ drag-to-select handles copying.
 - Full-screen uses the terminal's alternate screen buffer and restores it on exit.
 - On Windows, the console input mode is switched to deliver mouse events (QuickEdit is temporarily
   disabled) and restored on exit.
-- When output is piped or the terminal is non-interactive, it prints a single static table and exits.
+- When output is piped or the terminal is non-interactive, it takes the headless path (a single
+  static table by default) and exits — see [Headless & CI mode](#headless--ci-mode).
 
 ## Project layout
 
