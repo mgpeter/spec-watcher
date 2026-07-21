@@ -41,7 +41,7 @@ dotnet publish SpecWatcher.CLI/SpecWatcher.Console.csproj -c Release -r win-x64 
   of a bare exe so the installed command alias is a clean `spec-watcher` rather than the versioned
   asset filename.)
 
-## Winget manifests (schema 1.6+, `InstallerType: portable`)
+## Winget manifests (schema 1.9+, `InstallerType: portable`)
 
 Three files under `manifests/u/UsualExpat/SpecWatcher/<version>/` in a fork of `microsoft/winget-pkgs`.
 Generate them with the tooling below rather than hand-editing; the shapes are:
@@ -65,16 +65,16 @@ Installers:
     InstallerUrl: https://github.com/mgpeter/spec-watcher/releases/download/vX.Y.Z/spec-watcher-X.Y.Z-win-arm64.zip
     InstallerSha256: <sha256>
 ManifestType: installer
-ManifestVersion: 1.6.0
+ManifestVersion: 1.9.0
 ```
 
 **`UsualExpat.SpecWatcher.locale.en-US.yaml`** — `Publisher: Usual Expat Limited`, `Author`,
 `PackageName`, `PublisherUrl`, `PublisherSupportUrl`, `PackageUrl`, `License: MIT`, `LicenseUrl`,
 `ShortDescription`, `Description`, `Tags` (e.g. `cli`, `tui`, `specs`, `dotnet`, `agent-os`),
-`ReleaseNotesUrl`, `ManifestType: defaultLocale`, `ManifestVersion: 1.6.0`.
+`ReleaseNotesUrl`, `ManifestType: defaultLocale`, `ManifestVersion: 1.9.0`.
 
 **`UsualExpat.SpecWatcher.yaml`** (version) — `PackageIdentifier`, `PackageVersion`,
-`DefaultLocale: en-US`, `ManifestType: version`, `ManifestVersion: 1.6.0`.
+`DefaultLocale: en-US`, `ManifestType: version`, `ManifestVersion: 1.9.0`.
 
 Portable install semantics: winget downloads the exe and registers a symlink/alias
 (`%LOCALAPPDATA%\Microsoft\WinGet\Links`, already on PATH) named per `PortableCommandAlias`, so
