@@ -64,11 +64,15 @@ dotnet build -c Release
 | Input                    | Action                          |
 | ------------------------ | ------------------------------- |
 | `↑` / `↓` / `PgUp` / `PgDn` / **wheel** | Scroll the spec  |
+| **Drag** over text       | Select & auto-copy to clipboard |
 | `Esc` / `Backspace` / `←`| Back to the list                |
 | `Q`                      | Quit                            |
 
-Mouse (wheel + click) is supported on Windows (Windows Terminal / conhost). On other platforms, or
-when input is redirected, the app runs keyboard-only.
+Mouse (wheel + click) is supported on Windows (Windows Terminal / conhost). A **left-drag** selects
+text and copies it to the clipboard automatically on release (a plain click still opens the row) —
+most useful in the detail view. The highlight clears on the next key press or scroll. On other
+platforms, or when input is redirected, the app runs keyboard-only and your terminal's own
+drag-to-select handles copying.
 
 ## How it reads a spec
 

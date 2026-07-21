@@ -22,6 +22,7 @@ public sealed class WindowsConsoleInput : IInputSource
     private readonly Thread _thread;
     private readonly IntPtr _hIn;
     private readonly uint _originalMode;
+    private uint _prevButtons;   // last-seen button bits, to detect press vs release edges
 
     public WindowsConsoleInput()
     {
@@ -84,18 +85,42 @@ public sealed class WindowsConsoleInput : IInputSource
             case MOUSE_EVENT:
             {
                 var m = rec.MouseEvent;
+                var x = m.dwMousePosition.X;
+                var y = m.dwMousePosition.Y;
+
                 if ((m.dwEventFlags & MOUSE_WHEELED) != 0)
                 {
+                    // On a wheel record dwButtonState carries the wheel delta, not button bits,
+                    // so translate it here and DON'T let it clobber _prevButtons below.
                     var wheel = (short)(m.dwButtonState >> 16);   // signed high word; + = up
                     var notches = wheel / 120;
                     if (notches != 0)
-                        _queue.Enqueue(InputEvent.Wheel(notches, m.dwMousePosition.X, m.dwMousePosition.Y));
+                        _queue.Enqueue(InputEvent.Wheel(notches, x, y));
+                    break;
                 }
-                else if ((m.dwEventFlags == 0 || m.dwEventFlags == DOUBLE_CLICK)
-                         && (m.dwButtonState & FROM_LEFT_1ST_BUTTON_PRESSED) != 0)
+
+                var leftNow = (m.dwButtonState & FROM_LEFT_1ST_BUTTON_PRESSED) != 0;
+                var leftPrev = (_prevButtons & FROM_LEFT_1ST_BUTTON_PRESSED) != 0;
+
+                if ((m.dwEventFlags & MOUSE_MOVED) != 0)
                 {
-                    _queue.Enqueue(InputEvent.Click(m.dwMousePosition.X, m.dwMousePosition.Y));
+                    // Move records only matter while the left button is held → a drag.
+                    if (leftNow)
+                        _queue.Enqueue(InputEvent.Drag(x, y));
                 }
+                else if (m.dwEventFlags == DOUBLE_CLICK)
+                {
+                    // Complete a double-click as a click so it still opens the row.
+                    _queue.Enqueue(InputEvent.Down(x, y));
+                    _queue.Enqueue(InputEvent.Up(x, y));
+                }
+                else   // dwEventFlags == 0 → a button-state change (press or release edge)
+                {
+                    if (leftNow && !leftPrev) _queue.Enqueue(InputEvent.Down(x, y));
+                    else if (!leftNow && leftPrev) _queue.Enqueue(InputEvent.Up(x, y));
+                }
+
+                _prevButtons = m.dwButtonState;
                 break;
             }
 
@@ -131,6 +156,7 @@ public sealed class WindowsConsoleInput : IInputSource
     private const ushort WINDOW_BUFFER_SIZE_EVENT = 0x0004;
 
     private const uint FROM_LEFT_1ST_BUTTON_PRESSED = 0x0001;
+    private const uint MOUSE_MOVED = 0x0001;   // dwEventFlags bit (distinct namespace from button bits)
     private const uint DOUBLE_CLICK = 0x0002;
     private const uint MOUSE_WHEELED = 0x0004;
 

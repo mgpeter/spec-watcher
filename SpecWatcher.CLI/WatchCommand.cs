@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -47,8 +48,18 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     private int _scrollOffset;
     private int _visibleRows = 1;
     private SpecRow? _detailRow;
-    private string[] _detailLines = Array.Empty<string>();
+    private string[] _detailLines = Array.Empty<string>();     // styled markup, one per line
+    private string[] _detailPlain = Array.Empty<string>();     // visible plain text, parallel to _detailLines
     private int _detailScroll;
+
+    // Mouse text selection (Herdr-style): the app keeps the mouse and draws its own highlight, so
+    // the constant live-refresh can't erase it. Coordinates are content coords for the active view
+    // (Line = row/detail-line index, Col = char offset into that line's plain text).
+    private (int Line, int Col)? _selAnchor;   // set on mouse-down
+    private (int Line, int Col)? _selHead;     // updated on drag
+    private int _downScreenY;                  // screen Y of the last mouse-down (for click dispatch)
+    private string? _copyToast;                // transient "copied N chars" footer message
+    private long _copyToastUntilTick;
 
     public override async Task<int> ExecuteAsync(CommandContext context, WatchSettings settings)
     {
@@ -115,17 +126,37 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         switch (evt.Kind)
         {
             case InputKind.Key:
+                ClearSelection();
                 if (_view == View.List) HandleListKey(evt.Key, data);
                 else HandleDetailKey(evt.Key);
                 break;
 
             case InputKind.MouseWheel:
+                ClearSelection();
                 if (_view == View.List) MoveSelection(-evt.WheelNotches, data);   // wheel up = earlier rows
                 else ScrollDetail(-evt.WheelNotches * 3);
                 break;
 
-            case InputKind.MouseClick:
-                if (_view == View.List) ClickRow(evt.Row, data);
+            case InputKind.MouseDown:
+                _downScreenY = evt.Row;
+                var down = MapToContent(evt.Column, evt.Row, data);
+                _selAnchor = down;
+                _selHead = down;   // anchor == head → nothing highlighted yet
+                break;
+
+            case InputKind.MouseDrag:
+                if (_selAnchor is not null && MapToContent(evt.Column, evt.Row, data) is { } head)
+                    _selHead = head;
+                break;
+
+            case InputKind.MouseUp:
+                if (SelectionRange() is not null)
+                    CopySelection(data);                       // a real drag → auto-copy, keep highlight
+                else
+                {
+                    if (_view == View.List) ClickRow(_downScreenY, data);   // a plain click → open row
+                    ClearSelection();
+                }
                 break;
 
             case InputKind.Resize:
@@ -197,9 +228,106 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         if (data.Rows.IsDefaultOrEmpty) return;
         var row = data.Rows[Math.Clamp(_selectedIndex, 0, data.Rows.Length - 1)];
         _detailRow = row;
-        _detailLines = BuildDetailLines(row, SpecParser.LoadDetail(row.FullPath));
+        (_detailLines, _detailPlain) = BuildDetailLines(row, SpecParser.LoadDetail(row.FullPath));
         _detailScroll = 0;
         _view = View.Detail;
+        ClearSelection();
+    }
+
+    // ---- mouse text selection -------------------------------------------
+
+    private void ClearSelection()
+    {
+        _selAnchor = null;
+        _selHead = null;
+    }
+
+    /// <summary>Normalised (Lo ≤ Hi) selection range in content coords, or null when nothing is selected.</summary>
+    private ((int Line, int Col) Lo, (int Line, int Col) Hi)? SelectionRange()
+    {
+        if (_selAnchor is not { } a || _selHead is not { } h || a == h) return null;
+        var aBeforeH = a.Line < h.Line || (a.Line == h.Line && a.Col < h.Col);
+        return aBeforeH ? (a, h) : (h, a);
+    }
+
+    /// <summary>The [from,to) selected column span for a given content line, given its plain length.</summary>
+    private static (int From, int To) LineSpan(((int Line, int Col) Lo, (int Line, int Col) Hi) sel, int line, int len)
+    {
+        int from, to;
+        if (sel.Lo.Line == sel.Hi.Line) { from = sel.Lo.Col; to = sel.Hi.Col; }
+        else if (line == sel.Lo.Line) { from = sel.Lo.Col; to = len; }
+        else if (line == sel.Hi.Line) { from = 0; to = sel.Hi.Col; }
+        else { from = 0; to = len; }
+        from = Math.Clamp(from, 0, len);
+        to = Math.Clamp(to, 0, len);
+        return (from, to);
+    }
+
+    /// <summary>Re-render one plain body line with the selected column span shown as a highlight band.</summary>
+    private static string HighlightLine(string plain, int from, int to)
+    {
+        if (to <= from) return Markup.Escape(plain);
+        return Markup.Escape(plain[..from]) +
+               $"[black on grey62]{Markup.Escape(plain[from..to])}[/]" +
+               Markup.Escape(plain[to..]);
+    }
+
+    /// <summary>Map a screen cell to a content coord (line index + char offset) for the active view, or null off-content.</summary>
+    private (int Line, int Col)? MapToContent(int x, int y, ScanResult data)
+    {
+        if (_view == View.Detail)
+        {
+            const int contentTop = TitleHeight + 1;                       // panel top border
+            if (y < contentTop) return null;
+            var slice = y - contentTop;
+            if (slice >= DetailViewportHeight()) return null;
+            var start = Math.Clamp(_detailScroll, 0, DetailMaxScroll());
+            var idx = start + slice;
+            if (idx < 0 || idx >= _detailPlain.Length) return null;
+            var col = Math.Clamp(x - 2, 0, _detailPlain[idx].Length);      // panel left border + padding
+            return (idx, col);
+        }
+
+        if (data.Rows.IsDefaultOrEmpty || y < ListContentTop) return null;
+        var rowSlice = y - ListContentTop;
+        if (rowSlice >= _visibleRows) return null;
+        var rowIdx = _scrollOffset + rowSlice;
+        if (rowIdx < 0 || rowIdx >= data.Rows.Length) return null;
+        var plain = RowPlain(data.Rows[rowIdx], rowIdx == _selectedIndex, ComputeNameW());
+        return (rowIdx, Math.Clamp(x, 0, plain.Length));
+    }
+
+    /// <summary>Plain visible text of every content line in the active view, indexed by content line.</summary>
+    private string[] CurrentPlainLines(ScanResult data)
+    {
+        if (_view == View.Detail) return _detailPlain;
+        if (data.Rows.IsDefaultOrEmpty) return Array.Empty<string>();
+        var nameW = ComputeNameW();
+        var arr = new string[data.Rows.Length];
+        for (var i = 0; i < arr.Length; i++)
+            arr[i] = RowPlain(data.Rows[i], i == _selectedIndex, nameW);
+        return arr;
+    }
+
+    private void CopySelection(ScanResult data)
+    {
+        if (SelectionRange() is not { } sel) return;
+        var lines = CurrentPlainLines(data);
+
+        var sb = new StringBuilder();
+        for (var idx = sel.Lo.Line; idx <= sel.Hi.Line && idx < lines.Length; idx++)
+        {
+            var (from, to) = LineSpan(sel, idx, lines[idx].Length);
+            sb.Append(lines[idx][from..to].TrimEnd());   // trim right-pad on fixed-width list rows
+            if (idx != sel.Hi.Line) sb.Append('\n');
+        }
+
+        var text = sb.ToString();
+        if (SystemClipboard.TryCopy(text))
+        {
+            _copyToast = $"copied {text.Length} char{(text.Length == 1 ? "" : "s")}";
+            _copyToastUntilTick = Environment.TickCount64 + 1200;
+        }
     }
 
     private void ClampSelection(ScanResult data)
@@ -317,10 +445,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     // and lets Progress have a proper, non-collapsing width.
     private IRenderable BuildList(ScanResult r)
     {
-        // Leave a 1-column right margin so an exactly-full line can never wrap.
-        var width = Math.Max(60, SafeWindowWidth()) - 1;
-        var nameW = Math.Max(16, width - CaretW - StatusW - ProgressW - FolderW - 4);  // 4 single-space gaps
-
+        var nameW = ComputeNameW();
         var lines = new List<string>(_visibleRows + 1) { HeaderLine(nameW) };
 
         if (r.Rows.IsDefaultOrEmpty)
@@ -330,14 +455,34 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         }
         else
         {
+            var sel = _view == View.List ? SelectionRange() : null;
             var count = r.Rows.Length;
             var start = Math.Clamp(_scrollOffset, 0, Math.Max(0, count - _visibleRows));
             var end = Math.Min(count, start + _visibleRows);
             for (var i = start; i < end; i++)
-                lines.Add(RowLine(r.Rows[i], i == _selectedIndex, nameW));
+            {
+                if (sel is { } s && i >= s.Lo.Line && i <= s.Hi.Line)
+                {
+                    var plain = RowPlain(r.Rows[i], i == _selectedIndex, nameW);
+                    var (from, to) = LineSpan(s, i, plain.Length);
+                    lines.Add(HighlightLine(plain, from, to));
+                }
+                else
+                {
+                    lines.Add(RowLine(r.Rows[i], i == _selectedIndex, nameW));
+                }
+            }
         }
 
         return new Markup(string.Join('\n', lines));
+    }
+
+    // Fixed-width name column: fills the row after the other columns and their single-space gaps.
+    // Leave a 1-column right margin so an exactly-full line can never wrap.
+    private int ComputeNameW()
+    {
+        var width = Math.Max(60, SafeWindowWidth()) - 1;
+        return Math.Max(16, width - CaretW - StatusW - ProgressW - FolderW - 4);  // 4 single-space gaps
     }
 
     private static string HeaderLine(int nameW)
@@ -356,12 +501,21 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         var caret = selected ? "[aqua]❯[/]" : " ";
         var name = (selected ? "[bold white]" : "[grey85]") + Markup.Escape(Pad(row.Name, nameW)) + "[/]";
         var status = StatusColor(row.Status) + Markup.Escape(Pad(StatusText(row), StatusW)) + "[/]";
-        var (progMarkup, progVisible) = ProgressField(row);
-        var prog = progVisible < ProgressW ? progMarkup + new string(' ', ProgressW - progVisible) : progMarkup;
+        var (progMarkup, progPlain) = ProgressField(row);
+        var prog = progPlain.Length < ProgressW ? progMarkup + new string(' ', ProgressW - progPlain.Length) : progMarkup;
         var folder = "[grey42]" + Markup.Escape(Pad(row.Folder, FolderW)) + "[/]";
 
         var line = $"{caret} {name} {status} {prog} {folder}";
         return selected ? $"[on grey23]{line}[/]" : line;
+    }
+
+    /// <summary>Plain visible text of a list row, mirroring <see cref="RowLine"/>'s exact column layout.</summary>
+    private static string RowPlain(SpecRow row, bool selected, int nameW)
+    {
+        var caret = selected ? "❯" : " ";
+        var (_, progPlain) = ProgressField(row);
+        var prog = progPlain.Length < ProgressW ? progPlain + new string(' ', ProgressW - progPlain.Length) : progPlain;
+        return $"{caret} {Pad(row.Name, nameW)} {Pad(StatusText(row), StatusW)} {prog} {Pad(row.Folder, FolderW)}";
     }
 
     private static string StatusText(SpecRow row) => row.Status switch
@@ -380,22 +534,21 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         _ => "[grey]",
     };
 
-    /// <summary>Progress bar + percentage + counts, plus its exact visible width for padding.</summary>
-    private static (string Markup, int Visible) ProgressField(SpecRow row)
+    /// <summary>Progress bar + percentage + counts as both styled markup and its plain visible text.</summary>
+    private static (string Markup, string Plain) ProgressField(SpecRow row)
     {
         if (!row.HasTasks || row.Total == 0)
-            return ("[grey]—[/]", 1);
+            return ("[grey]—[/]", "—");
 
         const int barWidth = 10;
         var pct = row.Progress ?? 0;
         var filled = Math.Min(barWidth, (int)Math.Round(pct * barWidth));
         var colour = pct >= 1.0 ? "green" : pct > 0 ? "deepskyblue1" : "grey";
+        var barPlain = new string('▓', filled) + new string('░', barWidth - filled);
         var bar = $"[{colour}]{new string('▓', filled)}[/][grey27]{new string('░', barWidth - filled)}[/]";
         var pctText = $"{(int)Math.Round(pct * 100)}%";
         var counts = $"{row.Done}/{row.Total}";
-        var markup = $"{bar} [grey]{pctText} {counts}[/]";
-        var visible = barWidth + 1 + pctText.Length + 1 + counts.Length;
-        return (markup, visible);
+        return ($"{bar} [grey]{pctText} {counts}[/]", $"{barPlain} {pctText} {counts}");
     }
 
     /// <summary>Truncate (with … ) or right-pad raw text to an exact visible width.</summary>
@@ -410,8 +563,24 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     {
         var height = DetailViewportHeight();
         var start = Math.Clamp(_detailScroll, 0, DetailMaxScroll());
-        var visible = _detailLines.Skip(start).Take(height);
-        var body = new Markup(string.Join('\n', visible));
+        var sel = _view == View.Detail ? SelectionRange() : null;
+
+        var visibleLines = new List<string>(height);
+        for (var i = 0; i < height && start + i < _detailLines.Length; i++)
+        {
+            var idx = start + i;
+            if (sel is { } s && idx >= s.Lo.Line && idx <= s.Hi.Line)
+            {
+                var plain = _detailPlain[idx];
+                var (from, to) = LineSpan(s, idx, plain.Length);
+                visibleLines.Add(HighlightLine(plain, from, to));
+            }
+            else
+            {
+                visibleLines.Add(_detailLines[idx]);
+            }
+        }
+        var body = new Markup(string.Join('\n', visibleLines));
 
         var title = _detailRow is { } d ? $"[bold]{Markup.Escape(d.Name)}[/]" : "spec";
         var more = DetailMaxScroll() > 0 ? $"  [grey]({start + 1}-{Math.Min(_detailLines.Length, start + height)}/{_detailLines.Length})[/]" : "";
@@ -444,10 +613,18 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
                 $"[grey]{_selectedIndex + 1}/{r.Rows.Length}[/]";
         }
 
-        var mouseHint = mouse ? "[grey] · wheel/click[/]" : "";
-        var keys = _view == View.Detail
-            ? $"[bold]↑↓[/] [grey]scroll[/]   [bold]Esc[/] [grey]back[/]{mouseHint}   [bold]Q[/] [grey]quit[/]"
-            : $"[bold]↑↓[/] [grey]nav[/]   [bold]Enter[/] [grey]open[/]{mouseHint}   [bold]R[/] [grey]refresh[/]   [bold]Q[/] [grey]quit[/]";
+        string keys;
+        if (mouse && _copyToast is { } toast && Environment.TickCount64 < _copyToastUntilTick)
+        {
+            keys = $"[green]✔ {Markup.Escape(toast)}[/]";
+        }
+        else
+        {
+            var mouseHint = mouse ? "[grey] · wheel · drag-copy[/]" : "";
+            keys = _view == View.Detail
+                ? $"[bold]↑↓[/] [grey]scroll[/]   [bold]Esc[/] [grey]back[/]{mouseHint}   [bold]Q[/] [grey]quit[/]"
+                : $"[bold]↑↓[/] [grey]nav[/]   [bold]Enter[/] [grey]open[/]{mouseHint}   [bold]R[/] [grey]refresh[/]   [bold]Q[/] [grey]quit[/]";
+        }
 
         var grid = new Grid();
         grid.AddColumn(new GridColumn().NoWrap());
@@ -512,27 +689,30 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     [GeneratedRegex(@"^(?<indent>\s*)[-*]\s*\[(?<mark>[ xX])\]\s?(?<text>.*)$")]
     private static partial Regex DetailCheckbox();
 
-    private static string[] BuildDetailLines(SpecRow row, SpecDetail detail)
+    private static (string[] Styled, string[] Plain) BuildDetailLines(SpecRow row, SpecDetail detail)
     {
-        var lines = new List<string>
-        {
-            $"[grey]{Markup.Escape(row.FullPath)}[/]",
-            string.Empty,
-        };
+        var styled = new List<string>();
+        var plain = new List<string>();
+
+        void Add(string s, string p) { styled.Add(s); plain.Add(p); }
+        void AddMd(string raw) { var (s, p) = StyleMarkdownLine(raw); styled.Add(s); plain.Add(p); }
+
+        Add($"[grey]{Markup.Escape(row.FullPath)}[/]", row.FullPath);
+        Add(string.Empty, string.Empty);
 
         if (detail.SpecText is { } spec)
         {
             foreach (var raw in spec.Replace("\r\n", "\n").Split('\n'))
-                lines.Add(StyleMarkdownLine(raw));
+                AddMd(raw);
         }
         else
         {
-            lines.Add("[grey italic]no spec.md[/]");
+            Add("[grey italic]no spec.md[/]", "no spec.md");
         }
 
-        lines.Add(string.Empty);
-        lines.Add("[grey]──────── Tasks ────────[/]");
-        lines.Add(string.Empty);
+        Add(string.Empty, string.Empty);
+        Add("[grey]──────── Tasks ────────[/]", "──────── Tasks ────────");
+        Add(string.Empty, string.Empty);
 
         if (detail.TasksText is { } tasks)
         {
@@ -540,43 +720,46 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
             {
                 // Skip the "# Spec Tasks" heading noise; keep everything else.
                 if (raw.TrimStart().StartsWith("# ")) continue;
-                lines.Add(StyleMarkdownLine(raw));
+                AddMd(raw);
             }
         }
         else
         {
-            lines.Add("[grey italic]no tasks.md[/]");
+            Add("[grey italic]no tasks.md[/]", "no tasks.md");
         }
 
-        return lines.ToArray();
+        return (styled.ToArray(), plain.ToArray());
     }
 
-    private static string StyleMarkdownLine(string raw)
+    /// <summary>Style one markdown line, returning both the styled markup and its plain visible text.</summary>
+    private static (string Styled, string Plain) StyleMarkdownLine(string raw)
     {
         var line = raw.TrimEnd();
-        if (line.Length == 0) return string.Empty;
+        if (line.Length == 0) return (string.Empty, string.Empty);
 
         var checkbox = DetailCheckbox().Match(line);
         if (checkbox.Success)
         {
             var indent = checkbox.Groups["indent"].Value;
             var done = checkbox.Groups["mark"].Value is "x" or "X";
+            var glyph = done ? "✔" : "○";
             var box = done ? "[green]✔[/]" : "[grey]○[/]";
-            var text = Markup.Escape(checkbox.Groups["text"].Value);
+            var raw2 = checkbox.Groups["text"].Value;
+            var text = Markup.Escape(raw2);
             var styled = done ? $"[grey]{text}[/]" : text;
-            return $"{indent}{box} {styled}";
+            return ($"{indent}{box} {styled}", $"{indent}{glyph} {raw2}");
         }
 
         var trimmed = line.TrimStart();
-        if (trimmed.StartsWith("### ")) return $"[bold]{Markup.Escape(trimmed[4..])}[/]";
-        if (trimmed.StartsWith("## ")) return $"[bold aqua]{Markup.Escape(trimmed[3..])}[/]";
-        if (trimmed.StartsWith("# ")) return $"[bold underline aqua]{Markup.Escape(trimmed[2..])}[/]";
-        if (trimmed.StartsWith('>')) return $"[grey]{Markup.Escape(trimmed[1..].TrimStart())}[/]";
+        if (trimmed.StartsWith("### ")) return ($"[bold]{Markup.Escape(trimmed[4..])}[/]", trimmed[4..]);
+        if (trimmed.StartsWith("## ")) return ($"[bold aqua]{Markup.Escape(trimmed[3..])}[/]", trimmed[3..]);
+        if (trimmed.StartsWith("# ")) return ($"[bold underline aqua]{Markup.Escape(trimmed[2..])}[/]", trimmed[2..]);
+        if (trimmed.StartsWith('>')) { var t = trimmed[1..].TrimStart(); return ($"[grey]{Markup.Escape(t)}[/]", t); }
         if (trimmed.StartsWith("- ") || trimmed.StartsWith("* "))
         {
             var indent = line[..(line.Length - trimmed.Length)];
-            return $"{indent}[grey]•[/] {Markup.Escape(trimmed[2..])}";
+            return ($"{indent}[grey]•[/] {Markup.Escape(trimmed[2..])}", $"{indent}• {trimmed[2..]}");
         }
-        return Markup.Escape(line);
+        return (Markup.Escape(line), line);
     }
 }
