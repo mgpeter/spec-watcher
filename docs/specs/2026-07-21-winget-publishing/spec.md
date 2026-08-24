@@ -2,7 +2,7 @@
 
 > Spec: Winget Publishing
 > Created: 2026-07-21
-> Status: Planning
+> Status: Complete
 
 ## Overview
 

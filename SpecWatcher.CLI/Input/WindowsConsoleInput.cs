@@ -75,7 +75,9 @@ public sealed class WindowsConsoleInput : IInputSource
         {
             case KEY_EVENT when rec.KeyEvent.bKeyDown != 0:
             {
-                var evt = InputEvent.FromKey((ConsoleKey)rec.KeyEvent.wVirtualKeyCode, rec.KeyEvent.UnicodeChar);
+                var shift = (rec.KeyEvent.dwControlKeyState & SHIFT_PRESSED) != 0;
+                var evt = InputEvent.FromKey(
+                    (ConsoleKey)rec.KeyEvent.wVirtualKeyCode, rec.KeyEvent.UnicodeChar, shift);
                 var repeat = Math.Max((ushort)1, rec.KeyEvent.wRepeatCount);
                 for (var i = 0; i < repeat; i++)
                     _queue.Enqueue(evt);
@@ -154,6 +156,8 @@ public sealed class WindowsConsoleInput : IInputSource
     private const ushort KEY_EVENT = 0x0001;
     private const ushort MOUSE_EVENT = 0x0002;
     private const ushort WINDOW_BUFFER_SIZE_EVENT = 0x0004;
+
+    private const uint SHIFT_PRESSED = 0x0010;   // dwControlKeyState bit
 
     private const uint FROM_LEFT_1ST_BUTTON_PRESSED = 0x0001;
     private const uint MOUSE_MOVED = 0x0001;   // dwEventFlags bit (distinct namespace from button bits)

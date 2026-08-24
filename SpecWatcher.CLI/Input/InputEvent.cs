@@ -25,9 +25,11 @@ public readonly record struct InputEvent(
     char KeyChar = '\0',
     int Column = 0,
     int Row = 0,
-    int WheelNotches = 0)
+    int WheelNotches = 0,
+    bool Shift = false)
 {
-    public static InputEvent FromKey(ConsoleKey key, char ch = '\0') => new(InputKind.Key, key, ch);
+    public static InputEvent FromKey(ConsoleKey key, char ch = '\0', bool shift = false) =>
+        new(InputKind.Key, key, ch, Shift: shift);
     public static InputEvent Wheel(int notches, int col, int row) => new(InputKind.MouseWheel, Column: col, Row: row, WheelNotches: notches);
     public static InputEvent Down(int col, int row) => new(InputKind.MouseDown, Column: col, Row: row);
     public static InputEvent Drag(int col, int row) => new(InputKind.MouseDrag, Column: col, Row: row);

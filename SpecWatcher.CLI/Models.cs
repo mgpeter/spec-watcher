@@ -85,6 +85,34 @@ public sealed record GitCommit(
 /// <summary>Raw spec.md / tasks.md text loaded on demand for the detail view.</summary>
 public sealed record SpecDetail(string? SpecText, string? TasksText);
 
+/// <summary>The kind of interactive element found in a rendered detail document.</summary>
+public enum DetailElementKind
+{
+    /// <summary>A <c>- [ ]</c> / <c>- [x]</c> task line in tasks.md.</summary>
+    Checkbox,
+
+    /// <summary>The <c>&gt; Status:</c> line in spec.md.</summary>
+    Status,
+}
+
+/// <summary>
+/// One interactive element in the detail view: the only bridge between what is on screen and where
+/// it lives on disk. Emitted alongside the rendered line arrays, so the two cannot drift.
+/// </summary>
+/// <param name="Kind">What kind of element this is.</param>
+/// <param name="ContentLine">Index into the detail line arrays (what the user sees).</param>
+/// <param name="SourceFile">Absolute path of the file the line came from.</param>
+/// <param name="SourceLine">0-based line index within that file, counted as <c>Split('\n')</c> counts.</param>
+/// <param name="SourceText">The raw line as read, used as the optimistic-concurrency token on write.</param>
+/// <param name="IsChecked">Current mark; meaningful for <see cref="DetailElementKind.Checkbox"/> only.</param>
+public sealed record DetailElement(
+    DetailElementKind Kind,
+    int ContentLine,
+    string SourceFile,
+    int SourceLine,
+    string SourceText,
+    bool IsChecked = false);
+
 /// <summary>An immutable snapshot of one scan, published to the UI thread.</summary>
 /// <param name="Rows">The parsed spec rows.</param>
 /// <param name="CompletedAt">When the scan finished.</param>

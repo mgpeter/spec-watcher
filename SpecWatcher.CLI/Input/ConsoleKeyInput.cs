@@ -36,7 +36,8 @@ public sealed class ConsoleKeyInput : IInputSource
                 }
 
                 var key = Console.ReadKey(intercept: true);
-                _queue.Enqueue(InputEvent.FromKey(key.Key, key.KeyChar));
+                var shift = (key.Modifiers & ConsoleModifiers.Shift) != 0;
+                _queue.Enqueue(InputEvent.FromKey(key.Key, key.KeyChar, shift));
             }
             catch (InvalidOperationException)
             {

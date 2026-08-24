@@ -42,6 +42,11 @@ public sealed class WatchSettings : CommandSettings
     [DefaultValue(false)]
     public bool NoFlags { get; init; }
 
+    [CommandOption("--read-only")]
+    [Description("Disable all writes; ticking tasks and editing status are turned off.")]
+    [DefaultValue(false)]
+    public bool ReadOnly { get; init; }
+
     [CommandOption("--once")]
     [Description("Scan once, emit the board to stdout, and exit. Never enters the TUI.")]
     [DefaultValue(false)]
@@ -81,6 +86,12 @@ public sealed class WatchSettings : CommandSettings
     /// meaningless. The caller still ORs in the existing non-interactive capability check.
     /// </summary>
     public bool WantsHeadless => Once || FormatKind != OutputFormat.Table || HasGate;
+
+    /// <summary>
+    /// Whether the TUI may write to spec files. On unless suppressed, and never on a headless run —
+    /// so the JSON/markdown/gate paths are structurally incapable of editing anything.
+    /// </summary>
+    public bool EditingEnabled => !ReadOnly && !WantsHeadless;
 
     public override ValidationResult Validate()
     {

@@ -106,17 +106,32 @@ public static partial class SpecParser
     {
         if (text is null) return null;
         foreach (var rawLine in EnumerateLines(text))
-        {
-            var line = rawLine.TrimStart();
-            if (!line.StartsWith('>')) continue;
-            var content = line[1..].TrimStart();
-            var colon = content.IndexOf(':');
-            if (colon <= 0) continue;
-            var key = content[..colon].Trim();
-            if (key.Equals(field, StringComparison.OrdinalIgnoreCase))
-                return content[(colon + 1)..].Trim();
-        }
+            if (BlockquoteKey(rawLine) is { } key && key.Equals(field, StringComparison.OrdinalIgnoreCase))
+                return BlockquoteValue(rawLine);
         return null;
+    }
+
+    /// <summary>
+    /// The key of a <c>&gt; Key: value</c> line, or null when the line is not one. The single
+    /// definition of that shape, shared by the parser, the editor and the detail view.
+    /// </summary>
+    internal static string? BlockquoteKey(string line)
+    {
+        var trimmed = line.TrimStart();
+        if (!trimmed.StartsWith('>')) return null;
+        var content = trimmed[1..].TrimStart();
+        var colon = content.IndexOf(':');
+        return colon > 0 ? content[..colon].Trim() : null;
+    }
+
+    /// <summary>The value of a <c>&gt; Key: value</c> line; empty when the line is not one.</summary>
+    internal static string BlockquoteValue(string line)
+    {
+        var content = line.TrimStart();
+        if (!content.StartsWith('>')) return string.Empty;
+        content = content[1..].TrimStart();
+        var colon = content.IndexOf(':');
+        return colon > 0 ? content[(colon + 1)..].Trim() : string.Empty;
     }
 
     internal static SpecStatus NormaliseStatus(string raw)

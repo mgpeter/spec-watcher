@@ -2,7 +2,7 @@
 
 > Spec: Drift Attention Flags
 > Created: 2026-07-20
-> Status: Planning
+> Status: Complete
 
 ## Overview
 

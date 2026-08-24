@@ -8,6 +8,46 @@ using SpecWatcher.Input;
 
 namespace SpecWatcher;
 
+/// <summary>What the UI does after a write attempt.</summary>
+internal enum EditFollowUp
+{
+    /// <summary>The write failed in a way that leaves both disk and screen as they were.</summary>
+    None,
+
+    /// <summary>The write landed; re-read this spec and fold it back into the board.</summary>
+    Reload,
+
+    /// <summary>Disk has moved on underneath us; ask for a full rescan.</summary>
+    Rescan,
+}
+
+/// <summary>A rectangle of content cells covered by an overlay, in detail-document coordinates.</summary>
+/// <param name="Top">First content line covered.</param>
+/// <param name="Left">First content column covered.</param>
+/// <param name="Width">Width in cells.</param>
+/// <param name="Height">Height in lines.</param>
+internal readonly record struct OverlayBox(int Top, int Left, int Width, int Height)
+{
+    public bool Contains(int line, int col) =>
+        line >= Top && line < Top + Height && col >= Left && col < Left + Width;
+}
+
+/// <summary>
+/// What Escape should unwind next in the detail view. It peels one layer at a time instead of
+/// always leaving the view outright.
+/// </summary>
+internal enum EscapeAction
+{
+    /// <summary>An overlay is up; close it and keep the view and focus as they were.</summary>
+    ClosePicker,
+
+    /// <summary>An element is focused; drop focus but stay in the detail view.</summary>
+    ClearFocus,
+
+    /// <summary>Nothing left to unwind; go back to the list.</summary>
+    LeaveDetail,
+}
+
 /// <summary>
 /// The watch command: a full-screen, self-refreshing, navigable list of specs with a per-spec
 /// detail view.
@@ -54,6 +94,8 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     private SpecRow? _detailRow;
     private string[] _detailLines = Array.Empty<string>();     // styled markup, one per line
     private string[] _detailPlain = Array.Empty<string>();     // visible plain text, parallel to _detailLines
+    private ImmutableArray<DetailElement> _detailElements = ImmutableArray<DetailElement>.Empty;
+    private int _focusIndex = -1;                              // index into _detailElements; -1 = nothing focused
     private int _detailScroll;
 
     // Mouse text selection (Herdr-style): the app keeps the mouse and draws its own highlight, so
@@ -61,14 +103,53 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     // (Line = row/detail-line index, Col = char offset into that line's plain text).
     private (int Line, int Col)? _selAnchor;   // set on mouse-down
     private (int Line, int Col)? _selHead;     // updated on drag
+    private int _downScreenX;                  // screen X of the last mouse-down (for click dispatch)
     private int _downScreenY;                  // screen Y of the last mouse-down (for click dispatch)
-    private string? _copyToast;                // transient "copied N chars" footer message
-    private long _copyToastUntilTick;
+    private string? _toast;                    // transient footer message, pre-styled markup
+    private long _toastUntilTick;
+
+    // ---- editing ---------------------------------------------------------
+
+    private bool _editingEnabled = true;
+    private DriftOptions _driftOptions;
+    private int _editEpoch;                    // bumped on every successful write (Interlocked)
+
+    private bool _pickerOpen;
+    private bool _swallowMouseUp;              // the release that ends a picker gesture
+    private int _pickerIndex;
+    private ImmutableArray<string> _pickerChoices = ImmutableArray<string>.Empty;
+    private OverlayBox _pickerBox;             // geometry shared by the renderer and the hit-tester
+
+    // ---- test surface ----------------------------------------------------
+    //
+    // The instance wiring (keys → editor → re-parse → publish) is only meaningful end to end, so a
+    // narrow read-only window onto the UI state is exposed rather than duplicating the logic in a
+    // test double. Nothing here is used by the app itself.
+
+    internal ScanResult Latest => Volatile.Read(ref _latest);
+    internal bool InDetailView => _view == View.Detail;
+    internal bool Running => _running;
+    internal int FocusIndex => _focusIndex;
+    internal int DetailScroll => _detailScroll;
+    internal bool PickerOpen => _pickerOpen;
+    internal string[] DetailPlain => _detailPlain;
+    internal ImmutableArray<DetailElement> DetailElements => _detailElements;
+
+    /// <summary>Absolute screen Y of the detail panel's first content line.</summary>
+    internal const int DetailContentTop = TitleHeight + 1;
+
+    /// <summary>Adopt the startup options. Shared by <see cref="ExecuteAsync"/> and the tests.</summary>
+    internal void ApplySettings(WatchSettings settings)
+    {
+        _flagsVisible = !settings.NoFlags;
+        _driftOptions = settings.ToDriftOptions();
+        _editingEnabled = settings.EditingEnabled;
+    }
 
     public override async Task<int> ExecuteAsync(CommandContext context, WatchSettings settings)
     {
         var caps = AnsiConsole.Profile.Capabilities;
-        _flagsVisible = !settings.NoFlags;
+        ApplySettings(settings);
 
         // Headless (one-shot) path: the user asked for it (--once / --format json|md / a gate flag) OR
         // output is non-interactive (piped / redirected / dumb terminal). Scan once, emit the chosen
@@ -123,26 +204,33 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
 
     // ---- input handling --------------------------------------------------
 
-    private void HandleInput(InputEvent evt, ScanResult data)
+    internal void HandleInput(InputEvent evt, ScanResult data)
     {
         switch (evt.Kind)
         {
             case InputKind.Key:
                 ClearSelection();
+                // The picker is modal: it consumes every key so none leak through to the view below.
+                if (_pickerOpen) { HandlePickerKey(evt.Key, data); break; }
                 // Attention layer: `!` jumps between flagged rows, `F` toggles the whole layer.
                 if (evt.KeyChar == '!') { if (_view == View.List) JumpToNextFlagged(data); break; }
                 if (evt.Key == ConsoleKey.F) { _flagsVisible = !_flagsVisible; break; }
                 if (_view == View.List) HandleListKey(evt.Key, data);
-                else HandleDetailKey(evt.Key);
+                else HandleDetailKey(evt.Key, evt.Shift, data);
                 break;
 
             case InputKind.MouseWheel:
                 ClearSelection();
+                if (_pickerOpen) break;                                           // don't scroll out from under it
                 if (_view == View.List) MoveSelection(-evt.WheelNotches, data);   // wheel up = earlier rows
                 else ScrollDetail(-evt.WheelNotches * 3);
                 break;
 
             case InputKind.MouseDown:
+                // Handle the picker on press and swallow the release, so dismissing it by clicking
+                // away cannot also land as a click on the view underneath.
+                if (_pickerOpen) { HandlePickerClick(evt.Column, evt.Row, data); _swallowMouseUp = true; break; }
+                _downScreenX = evt.Column;
                 _downScreenY = evt.Row;
                 var down = MapToContent(evt.Column, evt.Row, data);
                 _selAnchor = down;
@@ -150,16 +238,20 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
                 break;
 
             case InputKind.MouseDrag:
+                if (_pickerOpen) break;
                 if (_selAnchor is not null && MapToContent(evt.Column, evt.Row, data) is { } head)
                     _selHead = head;
                 break;
 
             case InputKind.MouseUp:
+                if (_swallowMouseUp) { _swallowMouseUp = false; break; }
                 if (SelectionRange() is not null)
                     CopySelection(data);                       // a real drag → auto-copy, keep highlight
                 else
                 {
-                    if (_view == View.List) ClickRow(_downScreenY, data);   // a plain click → open row
+                    // A plain click: open a row in the list, or focus an element in the detail view.
+                    if (_view == View.List) ClickRow(_downScreenY, data);
+                    else FocusAt(_downScreenX, _downScreenY, data);
                     ClearSelection();
                 }
                 break;
@@ -185,7 +277,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         }
     }
 
-    private void HandleDetailKey(ConsoleKey key)
+    private void HandleDetailKey(ConsoleKey key, bool shift, ScanResult data)
     {
         switch (key)
         {
@@ -195,9 +287,38 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
             case ConsoleKey.PageDown: ScrollDetail(+DetailViewportHeight()); break;
             case ConsoleKey.Home: _detailScroll = 0; break;
             case ConsoleKey.End: _detailScroll = DetailMaxScroll(); break;
-            case ConsoleKey.Escape or ConsoleKey.Backspace or ConsoleKey.LeftArrow: _view = View.List; break;
+            // The focus cursor only exists to act on things, so read-only mode has no use for it.
+            case ConsoleKey.Tab when _editingEnabled: MoveFocus(FocusDelta(shift)); break;
+            case ConsoleKey.Enter or ConsoleKey.Spacebar: ActivateFocused(data); break;
+            case ConsoleKey.Escape: HandleEscape(); break;
+            case ConsoleKey.Backspace or ConsoleKey.LeftArrow: _view = View.List; break;
             case ConsoleKey.R: TriggerRefresh(); break;
             case ConsoleKey.Q: _running = false; break;
+        }
+    }
+
+    /// <summary>Act on the focused element: tick a task, or open the status dropdown.</summary>
+    private void ActivateFocused(ScanResult data)
+    {
+        if (!_editingEnabled) return;
+        switch (FocusedElement?.Kind)
+        {
+            case DetailElementKind.Checkbox: ToggleFocusedCheckbox(data); break;
+            case DetailElementKind.Status: OpenPicker(); break;
+        }
+    }
+
+    /// <summary>
+    /// Escape unwinds one layer at a time rather than always leaving the view, so a focused element
+    /// can be dismissed without losing your place in a long spec.
+    /// </summary>
+    private void HandleEscape()
+    {
+        switch (NextEscapeAction(_pickerOpen, hasFocus: _focusIndex >= 0))
+        {
+            case EscapeAction.ClosePicker: _pickerOpen = false; break;
+            case EscapeAction.ClearFocus: _focusIndex = -1; break;
+            case EscapeAction.LeaveDetail: _view = View.List; break;
         }
     }
 
@@ -233,10 +354,360 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         if (data.Rows.IsDefaultOrEmpty) return;
         var row = data.Rows[Math.Clamp(_selectedIndex, 0, data.Rows.Length - 1)];
         _detailRow = row;
-        (_detailLines, _detailPlain) = BuildDetailLines(row, SpecParser.LoadDetail(row.FullPath));
+        LoadDetailDocument(row);
         _detailScroll = 0;
         _view = View.Detail;
         ClearSelection();
+    }
+
+    /// <summary>
+    /// Re-read a spec from disk and rebuild the detail document. Focus is dropped because element
+    /// indices only mean anything against the document they were built with.
+    /// </summary>
+    private void LoadDetailDocument(SpecRow row)
+    {
+        (_detailLines, _detailPlain, _detailElements) =
+            BuildDetailLines(row, SpecParser.LoadDetail(row.FullPath));
+        _focusIndex = -1;
+    }
+
+    /// <summary>The focused interactive element, or null when nothing is focused.</summary>
+    private DetailElement? FocusedElement =>
+        _focusIndex >= 0 && _focusIndex < _detailElements.Length ? _detailElements[_focusIndex] : null;
+
+    // ---- focus cursor ----------------------------------------------------
+    //
+    // Focus is an index into _detailElements, independent of the scroll position. Every rule is a
+    // pure function of state so it can be tested without a console; the instance methods below only
+    // supply the current viewport.
+
+    /// <summary>Which way Tab moves: forward, or backward when Shift is held.</summary>
+    internal static int FocusDelta(bool shift) => shift ? -1 : +1;
+
+    /// <summary>
+    /// The next focused element index, wrapping in both directions. Returns -1 when there is nothing
+    /// to focus; entering from unfocused (or a stale index) lands on the first or last element
+    /// depending on direction.
+    /// </summary>
+    internal static int NextFocusIndex(ImmutableArray<DetailElement> elements, int current, int delta)
+    {
+        if (elements.IsDefaultOrEmpty) return -1;
+        var count = elements.Length;
+        if (current < 0 || current >= count)
+            return delta >= 0 ? 0 : count - 1;
+        return ((current + delta) % count + count) % count;
+    }
+
+    /// <summary>Index of the element rendered on <paramref name="contentLine"/>, or -1.</summary>
+    internal static int ElementAtContentLine(ImmutableArray<DetailElement> elements, int contentLine)
+    {
+        if (elements.IsDefaultOrEmpty) return -1;
+        for (var i = 0; i < elements.Length; i++)
+            if (elements[i].ContentLine == contentLine) return i;
+        return -1;
+    }
+
+    /// <summary>The scroll offset that brings <paramref name="contentLine"/> into view, moving as
+    /// little as possible. Mirrors <see cref="EnsureSelectedVisible"/> for the detail viewport.</summary>
+    internal static int ScrollToShow(int contentLine, int scroll, int viewportHeight, int totalLines)
+    {
+        if (contentLine < scroll) scroll = contentLine;
+        else if (contentLine >= scroll + viewportHeight) scroll = contentLine - viewportHeight + 1;
+        return Math.Clamp(scroll, 0, Math.Max(0, totalLines - viewportHeight));
+    }
+
+    /// <summary>Which layer Escape unwinds next.</summary>
+    internal static EscapeAction NextEscapeAction(bool pickerOpen, bool hasFocus) =>
+        pickerOpen ? EscapeAction.ClosePicker
+        : hasFocus ? EscapeAction.ClearFocus
+        : EscapeAction.LeaveDetail;
+
+    /// <summary>Style the focused element's line. Banded rather than prefixed, so the visible column
+    /// count still matches <see cref="_detailPlain"/> and drag-selection maths stays correct.
+    /// A different band colour to the drag selection, so both can be on screen at once.</summary>
+    internal static string FocusLine(string plain) => $"[black on deepskyblue1]{Markup.Escape(plain)}[/]";
+
+    private void MoveFocus(int delta)
+    {
+        _focusIndex = NextFocusIndex(_detailElements, _focusIndex, delta);
+        if (FocusedElement is { } element)
+            _detailScroll = ScrollToShow(
+                element.ContentLine, _detailScroll, DetailViewportHeight(), _detailLines.Length);
+    }
+
+    /// <summary>
+    /// Focus whatever element sits on the clicked screen cell; a miss clears focus. Landing squarely
+    /// on a checkbox glyph also toggles it, so a task can be ticked in one click.
+    /// </summary>
+    private void FocusAt(int x, int y, ScanResult data)
+    {
+        if (!_editingEnabled) return;
+        if (DetailCell(x, y) is not { } at) return;
+        _focusIndex = ElementAtContentLine(_detailElements, at.Line);
+
+        if (FocusedElement is not { Kind: DetailElementKind.Checkbox }) return;
+        if (at.Line < 0 || at.Line >= _detailPlain.Length) return;
+        if (IsGlyphHit(_detailPlain[at.Line], at.Col)) ToggleFocusedCheckbox(data);
+    }
+
+    /// <summary>Column of a checkbox line's mark glyph (its first non-space char), or -1.</summary>
+    internal static int GlyphColumn(string plain)
+    {
+        for (var i = 0; i < plain.Length; i++)
+            if (plain[i] != ' ') return i;
+        return -1;
+    }
+
+    /// <summary>Whether a click column landed on the mark glyph (or the cell beside it).</summary>
+    internal static bool IsGlyphHit(string plain, int col)
+    {
+        var glyph = GlyphColumn(plain);
+        return glyph >= 0 && col >= glyph && col <= glyph + 1;
+    }
+
+    // ---- applying an edit -------------------------------------------------
+
+    /// <summary>What to do after a write attempt.</summary>
+    internal static EditFollowUp FollowUpFor(EditResult result) => result switch
+    {
+        EditResult.Ok => EditFollowUp.Reload,
+        EditResult.Conflict => EditFollowUp.Rescan,
+        _ => EditFollowUp.None,
+    };
+
+    /// <summary>Footer message for a write attempt, already styled.</summary>
+    internal static string EditToastMarkup(EditResult result, string okText) => result switch
+    {
+        EditResult.Ok => $"[green]✔ {Markup.Escape(okText)}[/]",
+        EditResult.Conflict => "[orange1]⚠ file changed on disk[/]",
+        EditResult.Unwritable => "[orange1]⚠ read-only file[/]",
+        EditResult.NotFound => "[orange1]⚠ file missing[/]",
+        EditResult.NoStatusLine => "[orange1]⚠ no Status: line in spec.md[/]",
+        _ => "[orange1]⚠ edit failed[/]",
+    };
+
+    /// <summary>Replace a spec in the board by path, leaving the rest of the rows untouched.</summary>
+    internal static ImmutableArray<SpecRow> PatchRow(ImmutableArray<SpecRow> rows, SpecRow updated)
+    {
+        if (rows.IsDefaultOrEmpty) return rows;
+        for (var i = 0; i < rows.Length; i++)
+            if (string.Equals(rows[i].FullPath, updated.FullPath, StringComparison.OrdinalIgnoreCase))
+                return rows.SetItem(i, updated);
+        return rows;
+    }
+
+    /// <summary>
+    /// Fold a freshly parsed row back onto the one it replaces: drift is recomputed from the new
+    /// counts, and git enrichment is carried over rather than re-run (it costs a subprocess and
+    /// cannot have changed as a result of our own write).
+    /// </summary>
+    internal static SpecRow MergeReparsed(SpecRow fresh, SpecRow previous, DateTimeOffset now, DriftOptions options)
+    {
+        var (state, reason) = DriftAnalyzer.Analyze(fresh, now, options);
+        return fresh with
+        {
+            Drift = state,
+            DriftReason = reason,
+            IsCurrent = previous.IsCurrent,
+            LastCommit = previous.LastCommit,
+            RecentCommits = previous.RecentCommits,
+        };
+    }
+
+    /// <summary>Where focus lands after the document is rebuilt under it.</summary>
+    internal static int PreserveFocus(int previous, int elementCount) =>
+        previous < 0 || elementCount <= 0 ? -1 : Math.Min(previous, elementCount - 1);
+
+    private void ToggleFocusedCheckbox(ScanResult data)
+    {
+        if (!_editingEnabled) return;
+        if (FocusedElement is not { Kind: DetailElementKind.Checkbox } element) return;
+
+        var result = SpecEditor.ToggleCheckbox(
+            element.SourceFile, element.SourceLine, element.SourceText, !element.IsChecked);
+        ApplyEdit(result, data, element.IsChecked ? "unticked" : "ticked");
+    }
+
+    private void ApplyEdit(EditResult result, ScanResult data, string okText)
+    {
+        ShowToast(EditToastMarkup(result, okText));
+        switch (FollowUpFor(result))
+        {
+            case EditFollowUp.Reload: ReloadAfterEdit(data); break;
+            case EditFollowUp.Rescan: TriggerRefresh(); break;
+        }
+    }
+
+    /// <summary>
+    /// Re-read the edited spec and publish it, keeping the user exactly where they were. The epoch
+    /// bump tells an in-flight scan that it may be holding a pre-edit read of this folder.
+    /// </summary>
+    private void ReloadAfterEdit(ScanResult data)
+    {
+        if (_detailRow is not { } previous) return;
+
+        var fresh = MergeReparsed(SpecParser.Parse(previous.FullPath), previous, DateTimeOffset.Now, _driftOptions);
+        _detailRow = fresh;
+        Volatile.Write(ref _latest, data with { Rows = PatchRow(data.Rows, fresh) });
+        Interlocked.Increment(ref _editEpoch);
+
+        var focus = _focusIndex;
+        var scroll = _detailScroll;
+        LoadDetailDocument(fresh);
+        _focusIndex = PreserveFocus(focus, _detailElements.Length);
+        _detailScroll = Math.Clamp(scroll, 0, DetailMaxScroll());
+    }
+
+    private void ShowToast(string markup)
+    {
+        _toast = markup;
+        _toastUntilTick = Environment.TickCount64 + 1600;
+    }
+
+    // ---- status dropdown --------------------------------------------------
+    //
+    // Drawn inside the Live loop rather than via AnsiConsole.Prompt, which would take the console
+    // over and stall the render loop and the background scan. Geometry is computed once on open and
+    // read by both the renderer and the hit-tester, so the two cannot disagree about where it is.
+
+    private const string PickerTitle = " Status ";
+    private const int PickerLeft = 2;
+
+    /// <summary>The known statuses, plus the spec's current value when it is none of them.</summary>
+    internal static ImmutableArray<string> StatusChoices(string currentRaw)
+    {
+        var choices = ImmutableArray.CreateBuilder<string>();
+        choices.Add("Planning");
+        choices.Add("In progress");
+        choices.Add("Complete");
+
+        var current = (currentRaw ?? string.Empty).Trim();
+        if (current.Length > 0 && SpecParser.NormaliseStatus(current) == SpecStatus.Unknown)
+            choices.Add(current);
+
+        return choices.ToImmutable();
+    }
+
+    /// <summary>The choice to open on: whichever one the spec already says.</summary>
+    internal static int InitialChoiceIndex(ImmutableArray<string> choices, string currentRaw)
+    {
+        var current = (currentRaw ?? string.Empty).Trim();
+        if (current.Length == 0) return 0;
+
+        for (var i = 0; i < choices.Length; i++)
+            if (string.Equals(choices[i], current, StringComparison.OrdinalIgnoreCase))
+                return i;
+
+        var status = SpecParser.NormaliseStatus(current);
+        if (status != SpecStatus.Unknown)
+            for (var i = 0; i < choices.Length; i++)
+                if (SpecParser.NormaliseStatus(choices[i]) == status)
+                    return i;
+
+        return 0;
+    }
+
+    internal static int NextChoiceIndex(int count, int current, int delta) =>
+        count <= 0 ? 0 : ((current + delta) % count + count) % count;
+
+    /// <summary>
+    /// Where the box lands: below the status line, flipped above it when there is no room, and never
+    /// outside the visible slice of the document.
+    /// </summary>
+    internal static OverlayBox PickerBox(int anchorLine, ImmutableArray<string> choices, int scroll, int viewportHeight)
+    {
+        var height = choices.Length + 2;                                  // choices plus the border
+        var textW = Math.Max(PickerTitle.Length, choices.Max(c => c.Length));
+        var width = textW + 5;                                            // "│▸ " + text + " │"
+
+        var top = anchorLine + 1;
+        if (top + height > scroll + viewportHeight)
+            top = anchorLine - height;                                    // no room below, hang above
+        top = Math.Clamp(top, scroll, Math.Max(scroll, scroll + viewportHeight - height));
+
+        return new OverlayBox(top, PickerLeft, width, height);
+    }
+
+    /// <summary>The box as plain rows, each exactly <paramref name="width"/> cells wide.</summary>
+    internal static string[] PickerRows(ImmutableArray<string> choices, int selected, int width)
+    {
+        var inner = width - 2;
+        var rows = new string[choices.Length + 2];
+
+        rows[0] = "┌" + PickerTitle + new string('─', Math.Max(0, inner - PickerTitle.Length)) + "┐";
+        for (var i = 0; i < choices.Length; i++)
+        {
+            var marker = i == selected ? "▸" : " ";
+            rows[i + 1] = "│" + marker + " " + Pad(choices[i], Math.Max(0, inner - 2)) + "│";
+        }
+        rows[^1] = "└" + new string('─', Math.Max(0, inner)) + "┘";
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Lay one overlay row over a content line at a column span. The covered text is escaped, so a
+    /// spec containing literal Spectre markup cannot break the overlay.
+    /// </summary>
+    internal static string Splice(string plain, int left, string overlayPlain, string overlayStyle)
+    {
+        var padded = plain.Length < left ? plain.PadRight(left) : plain;
+        var right = Math.Min(padded.Length, left + overlayPlain.Length);
+        return Markup.Escape(padded[..left]) +
+               $"[{overlayStyle}]{Markup.Escape(overlayPlain)}[/]" +
+               Markup.Escape(padded[right..]);
+    }
+
+    private void OpenPicker()
+    {
+        if (!_editingEnabled) return;
+        if (FocusedElement is not { Kind: DetailElementKind.Status } element) return;
+
+        var current = SpecParser.BlockquoteValue(element.SourceText);
+        _pickerChoices = StatusChoices(current);
+        _pickerIndex = InitialChoiceIndex(_pickerChoices, current);
+        _pickerBox = PickerBox(element.ContentLine, _pickerChoices, _detailScroll, DetailViewportHeight());
+        _pickerOpen = true;
+    }
+
+    private void CommitPicker(ScanResult data)
+    {
+        _pickerOpen = false;
+        if (FocusedElement is not { Kind: DetailElementKind.Status } element) return;
+        if (_pickerIndex < 0 || _pickerIndex >= _pickerChoices.Length) return;
+
+        var choice = _pickerChoices[_pickerIndex];
+        ApplyEdit(SpecEditor.SetStatus(element.SourceFile, choice, element.SourceText), data, $"status → {choice}");
+    }
+
+    /// <summary>Keys while the picker is up. Everything is swallowed so no stray key escapes it.</summary>
+    private void HandlePickerKey(ConsoleKey key, ScanResult data)
+    {
+        switch (key)
+        {
+            case ConsoleKey.UpArrow: _pickerIndex = NextChoiceIndex(_pickerChoices.Length, _pickerIndex, -1); break;
+            case ConsoleKey.DownArrow: _pickerIndex = NextChoiceIndex(_pickerChoices.Length, _pickerIndex, +1); break;
+            case ConsoleKey.Home: _pickerIndex = 0; break;
+            case ConsoleKey.End: _pickerIndex = Math.Max(0, _pickerChoices.Length - 1); break;
+            case ConsoleKey.Enter or ConsoleKey.Spacebar: CommitPicker(data); break;
+            case ConsoleKey.Escape: _pickerOpen = false; break;
+        }
+    }
+
+    /// <summary>A click on a choice picks and commits it; anywhere else dismisses the box.</summary>
+    private void HandlePickerClick(int x, int y, ScanResult data)
+    {
+        if (DetailCell(x, y) is not { } cell || !_pickerBox.Contains(cell.Line, cell.Col))
+        {
+            _pickerOpen = false;
+            return;
+        }
+
+        var choice = cell.Line - _pickerBox.Top - 1;                       // skip the top border
+        if (choice < 0 || choice >= _pickerChoices.Length) return;         // a border cell: ignore
+
+        _pickerIndex = choice;
+        CommitPicker(data);
     }
 
     // ---- drift attention layer (consumes the DriftState engine) ---------
@@ -329,20 +800,29 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
                Markup.Escape(plain[to..]);
     }
 
+    /// <summary>
+    /// Map a screen cell to a detail-document cell without clamping the column to the line's length.
+    /// Overlay hit-testing needs the true column: clamping would report a click beside a short line
+    /// as landing before the overlay that visually covers it.
+    /// </summary>
+    private (int Line, int Col)? DetailCell(int x, int y)
+    {
+        const int contentTop = TitleHeight + 1;                           // panel top border
+        if (y < contentTop) return null;
+        var slice = y - contentTop;
+        if (slice >= DetailViewportHeight()) return null;
+        var line = Math.Clamp(_detailScroll, 0, DetailMaxScroll()) + slice;
+        return (line, x - 2);                                             // panel left border + padding
+    }
+
     /// <summary>Map a screen cell to a content coord (line index + char offset) for the active view, or null off-content.</summary>
     private (int Line, int Col)? MapToContent(int x, int y, ScanResult data)
     {
         if (_view == View.Detail)
         {
-            const int contentTop = TitleHeight + 1;                       // panel top border
-            if (y < contentTop) return null;
-            var slice = y - contentTop;
-            if (slice >= DetailViewportHeight()) return null;
-            var start = Math.Clamp(_detailScroll, 0, DetailMaxScroll());
-            var idx = start + slice;
-            if (idx < 0 || idx >= _detailPlain.Length) return null;
-            var col = Math.Clamp(x - 2, 0, _detailPlain[idx].Length);      // panel left border + padding
-            return (idx, col);
+            if (DetailCell(x, y) is not { } cell) return null;
+            if (cell.Line < 0 || cell.Line >= _detailPlain.Length) return null;
+            return (cell.Line, Math.Clamp(cell.Col, 0, _detailPlain[cell.Line].Length));
         }
 
         if (data.Rows.IsDefaultOrEmpty || y < ListContentTop) return null;
@@ -381,10 +861,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
 
         var text = sb.ToString();
         if (SystemClipboard.TryCopy(text))
-        {
-            _copyToast = $"copied {text.Length} char{(text.Length == 1 ? "" : "s")}";
-            _copyToastUntilTick = Environment.TickCount64 + 1200;
-        }
+            ShowToast($"[green]✔ copied {text.Length} char{(text.Length == 1 ? "" : "s")}[/]");
     }
 
     private void ClampSelection(ScanResult data)
@@ -444,8 +921,15 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         _isScanning = true;
         try
         {
+            // An edit that lands mid-scan may already be baked into this result, or may not be —
+            // the read happened at an unknown point. Rather than guess, note the epoch before
+            // starting and rescan if it moved, so the board converges within one scan.
+            var epoch = Volatile.Read(ref _editEpoch);
+
             var result = await SpecScanner.ScanAsync(settings.ResolvedSpecsDir, DateTimeOffset.Now, settings.ToDriftOptions(), ct);
             Volatile.Write(ref _latest, result);
+
+            if (Volatile.Read(ref _editEpoch) != epoch) TriggerRefresh();
         }
         finally
         {
@@ -663,6 +1147,8 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         var start = Math.Clamp(_detailScroll, 0, DetailMaxScroll());
         var sel = _view == View.Detail ? SelectionRange() : null;
 
+        var focusLine = FocusedElement?.ContentLine ?? -1;
+
         var visibleLines = new List<string>(height);
         for (var i = 0; i < height && start + i < _detailLines.Length; i++)
         {
@@ -673,11 +1159,19 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
                 var (from, to) = LineSpan(s, idx, plain.Length);
                 visibleLines.Add(HighlightLine(plain, from, to));
             }
+            else if (idx == focusLine)
+            {
+                // Focus is applied here, not baked into _detailLines, so the stored document stays
+                // the pure render and focus can move without rebuilding it.
+                visibleLines.Add(FocusLine(_detailPlain[idx]));
+            }
             else
             {
                 visibleLines.Add(_detailLines[idx]);
             }
         }
+
+        if (_pickerOpen) OverlayPicker(visibleLines, start);
         var body = new Markup(string.Join('\n', visibleLines));
 
         var title = _detailRow is { } d ? $"[bold]{Markup.Escape(d.Name)}[/]" : "spec";
@@ -685,6 +1179,56 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         return new Panel(body)
             .Header($" {title}{more} ")
             .Expand().Border(BoxBorder.Rounded).BorderColor(Color.Grey35);
+    }
+
+    /// <summary>
+    /// Draw the picker over the already-rendered lines. Spectre has no z-order, so the box is
+    /// spliced into the visible line strings; the styling of what it covers is lost while it is up.
+    /// </summary>
+    private void OverlayPicker(List<string> visibleLines, int scrollStart)
+    {
+        var rows = PickerRows(_pickerChoices, _pickerIndex, _pickerBox.Width);
+
+        for (var i = 0; i < rows.Length; i++)
+        {
+            var slot = _pickerBox.Top + i - scrollStart;                  // viewport row for this box row
+            if (slot < 0 || slot >= visibleLines.Count) continue;
+
+            var contentLine = _pickerBox.Top + i;
+            var beneath = contentLine < _detailPlain.Length ? _detailPlain[contentLine] : string.Empty;
+            var style = i - 1 == _pickerIndex ? "black on deepskyblue1" : "white on grey19";
+            visibleLines[slot] = Splice(beneath, _pickerBox.Left, rows[i], style);
+        }
+    }
+
+    /// <summary>
+    /// The detail view's key hints, tailored to what is focused so the next useful key is always
+    /// on screen rather than something the user has to know.
+    /// </summary>
+    internal static string DetailKeyHints(DetailElementKind? focused, bool pickerOpen, bool editing, bool mouse)
+    {
+        if (pickerOpen)
+            return "[bold]↑↓[/] [grey]pick[/]   [bold]Enter[/] [grey]set[/]   [bold]Esc[/] [grey]cancel[/]";
+
+        var hints = new List<string> { "[bold]↑↓[/] [grey]scroll[/]" };
+
+        if (editing)
+        {
+            hints.Add("[bold]Tab[/] [grey]focus[/]");
+            if (focused == DetailElementKind.Checkbox) hints.Add("[bold]Space[/] [grey]tick[/]");
+            if (focused == DetailElementKind.Status) hints.Add("[bold]Space[/] [grey]status[/]");
+        }
+
+        else
+        {
+            hints.Add("[grey italic]read-only[/]");
+        }
+
+        hints.Add("[bold]Esc[/] [grey]back[/]");
+        if (mouse) hints.Add("[grey]wheel · drag-copy[/]");
+        hints.Add("[bold]Q[/] [grey]quit[/]");
+
+        return string.Join("   ", hints);
     }
 
     private Panel BuildFooter(ScanResult r, WatchSettings s, bool mouse)
@@ -715,17 +1259,20 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         }
 
         string keys;
-        if (mouse && _copyToast is { } toast && Environment.TickCount64 < _copyToastUntilTick)
+        if (_toast is { } toast && Environment.TickCount64 < _toastUntilTick)
         {
-            keys = $"[green]✔ {Markup.Escape(toast)}[/]";
+            keys = toast;                                   // already styled by ShowToast
+        }
+        else if (_view == View.Detail)
+        {
+            keys = DetailKeyHints(FocusedElement?.Kind, _pickerOpen, _editingEnabled, mouse);
         }
         else
         {
             var mouseHint = mouse ? "[grey] · wheel · drag-copy[/]" : "";
-            var jumpHint = _view == View.List && flagged > 0 ? "   [bold]![/] [grey]flagged[/]" : "";
-            keys = _view == View.Detail
-                ? $"[bold]↑↓[/] [grey]scroll[/]   [bold]Esc[/] [grey]back[/]{mouseHint}   [bold]Q[/] [grey]quit[/]"
-                : $"[bold]↑↓[/] [grey]nav[/]   [bold]Enter[/] [grey]open[/]{jumpHint}{mouseHint}   [bold]R[/] [grey]refresh[/]   [bold]Q[/] [grey]quit[/]";
+            var jumpHint = flagged > 0 ? "   [bold]![/] [grey]flagged[/]" : "";
+            keys = $"[bold]↑↓[/] [grey]nav[/]   [bold]Enter[/] [grey]open[/]{jumpHint}{mouseHint}   " +
+                   $"[bold]R[/] [grey]refresh[/]   [bold]Q[/] [grey]quit[/]";
         }
 
         var grid = new Grid();
@@ -791,10 +1338,17 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     [GeneratedRegex(@"^(?<indent>\s*)[-*]\s*\[(?<mark>[ xX])\]\s?(?<text>.*)$")]
     private static partial Regex DetailCheckbox();
 
-    private static (string[] Styled, string[] Plain) BuildDetailLines(SpecRow row, SpecDetail detail)
+    /// <summary>
+    /// Render a spec's detail document, and alongside it the interactive elements it contains.
+    /// Source line indices are counted over every line of the source file, including lines dropped
+    /// from the render, so an element always points at the line the user is looking at.
+    /// </summary>
+    internal static (string[] Styled, string[] Plain, ImmutableArray<DetailElement> Elements)
+        BuildDetailLines(SpecRow row, SpecDetail detail)
     {
         var styled = new List<string>();
         var plain = new List<string>();
+        var elements = ImmutableArray.CreateBuilder<DetailElement>();
 
         void Add(string s, string p) { styled.Add(s); plain.Add(p); }
         void AddMd(string raw) { var (s, p) = StyleMarkdownLine(raw); styled.Add(s); plain.Add(p); }
@@ -804,8 +1358,20 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
 
         if (detail.SpecText is { } spec)
         {
-            foreach (var raw in spec.Replace("\r\n", "\n").Split('\n'))
-                AddMd(raw);
+            var specPath = Path.Combine(row.FullPath, "spec.md");
+            var lines = SplitLines(spec);
+            var haveStatus = false;
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var contentLine = styled.Count;
+                AddMd(lines[i]);
+
+                if (haveStatus) continue;
+                if (SpecParser.BlockquoteKey(lines[i]) is not { } key) continue;
+                if (!key.Equals("Status", StringComparison.OrdinalIgnoreCase)) continue;
+                elements.Add(new DetailElement(DetailElementKind.Status, contentLine, specPath, i, lines[i]));
+                haveStatus = true;
+            }
         }
         else
         {
@@ -818,11 +1384,22 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
 
         if (detail.TasksText is { } tasks)
         {
-            foreach (var raw in tasks.Replace("\r\n", "\n").Split('\n'))
+            var tasksPath = Path.Combine(row.FullPath, "tasks.md");
+            var lines = SplitLines(tasks);
+            for (var i = 0; i < lines.Length; i++)
             {
-                // Skip the "# Spec Tasks" heading noise; keep everything else.
-                if (raw.TrimStart().StartsWith("# ")) continue;
-                AddMd(raw);
+                // Skip the "# Spec Tasks" heading noise; keep everything else. The source index
+                // still advances, so element coordinates stay aligned with the file.
+                if (lines[i].TrimStart().StartsWith("# ")) continue;
+
+                var contentLine = styled.Count;
+                AddMd(lines[i]);
+
+                var box = DetailCheckbox().Match(lines[i].TrimEnd());
+                if (box.Success)
+                    elements.Add(new DetailElement(
+                        DetailElementKind.Checkbox, contentLine, tasksPath, i, lines[i],
+                        box.Groups["mark"].Value is "x" or "X"));
             }
         }
         else
@@ -849,8 +1426,11 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
             }
         }
 
-        return (styled.ToArray(), plain.ToArray());
+        return (styled.ToArray(), plain.ToArray(), elements.ToImmutable());
     }
+
+    /// <summary>Split source text into lines the way <see cref="SpecEditor"/> counts them.</summary>
+    private static string[] SplitLines(string text) => text.Replace("\r\n", "\n").Split('\n');
 
     /// <summary>Style one markdown line, returning both the styled markup and its plain visible text.</summary>
     private static (string Styled, string Plain) StyleMarkdownLine(string raw)

@@ -2,7 +2,7 @@
 
 > Spec: Inline Spec Editing
 > Created: 2026-08-24
-> Status: Planning
+> Status: Complete
 
 ## Overview
 

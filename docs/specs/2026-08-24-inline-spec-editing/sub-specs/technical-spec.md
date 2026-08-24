@@ -49,7 +49,7 @@ Mechanics, shared by both:
 - Compare the current line against `expectedLine` (ordinal, after `TrimEnd`) before writing. A mismatch
   returns `Conflict` and writes nothing — this is how an external edit between render and keypress is
   caught.
-- Write with `File.WriteAllText(path, text, new UTF8Encoding(encoderShouldEmitUTF8BOM: hadBom))`, so
+- Write with `File.WriteAllText(path, text, new UTF8Encoding(hadBom))`, so
   the UTF-8 posture from the v1.0.0 console fix is preserved.
 - `IOException` / `UnauthorizedAccessException` → `Unwritable`. Missing file → `NotFound`.
 
@@ -121,7 +121,24 @@ private long _editToastUntilTick;
 | `↑` `↓` `PgUp` `PgDn` `Home` `End` | Unchanged scrolling, except while the picker is open, where `↑↓` move `_pickerIndex` |
 
 `Esc` gains one extra hop before leaving the view; this is the only change to existing key semantics.
-`Space` in the **list** view already opens the detail view and is untouched.
+`Space` in the **list** view already opens the detail view and is untouched. `Backspace` / `←` still
+leave the detail view outright, so the old one-key exit is still there for anyone used to it.
+
+The hop is a pure function so the ladder can be tested and extended without a console:
+
+```csharp
+internal enum EscapeAction { ClosePicker, ClearFocus, LeaveDetail }
+
+internal static EscapeAction NextEscapeAction(bool pickerOpen, bool hasFocus) =>
+    pickerOpen ? EscapeAction.ClosePicker
+    : hasFocus ? EscapeAction.ClearFocus
+    : EscapeAction.LeaveDetail;
+```
+
+**`Shift+Tab` needs a modifier that `InputEvent` did not carry.** It gains a `bool Shift`, set from
+`ConsoleKeyInfo.Modifiers` in `ConsoleKeyInput` and from the `SHIFT_PRESSED` (`0x0010`) bit of
+`dwControlKeyState` in `WindowsConsoleInput` — a field already present in the `KEY_EVENT_RECORD`
+interop struct. Both are additive and default to false, so no existing binding changes.
 
 ### Rendering
 
@@ -129,9 +146,13 @@ private long _editToastUntilTick;
 time, exactly like the existing selection highlight, by re-styling the focused element's line:
 
 ```csharp
-// focused element line: caret + reverse-video body, so focus reads without colour alone
-visibleLines.Add($"[black on grey62]{Markup.Escape(_detailPlain[idx])}[/]");
+// Banded, not prefixed: a "▸ " prefix would shift the visible columns of that one line and put
+// MapToContent's column maths out by two, breaking drag-copy on exactly the line you focused.
+internal static string FocusLine(string plain) => $"[black on deepskyblue1]{Markup.Escape(plain)}[/]";
 ```
+
+The band colour differs from the drag selection's `grey62` because both can be on screen at once: a
+drag-copy keeps its highlight, and focus survives it.
 
 The picker is composited over the visible lines rather than layered by Spectre (which has no z-order).
 For each overlay row, take the plain text of the covered line, splice at the overlay's column span, and
@@ -151,19 +172,39 @@ clamped into the viewport) and is read by both the renderer and the hit-tester, 
 
 ### Mouse
 
-- `MouseDown` while `_pickerOpen`: inside `_pickerBox` → set `_pickerIndex` from the row; outside →
-  close the picker. Text selection is suppressed for the whole gesture.
-- `MouseUp` that is a plain click (existing click-vs-drag rule) in the detail view: map the screen cell
-  to a content coord with the existing `MapToContent`, then look up an element whose `ContentLine`
-  matches. A click anywhere on a checkbox line focuses it; a click within the first two visible columns
-  (the glyph) also toggles it.
+- `MouseDown` while `_pickerOpen` resolves the whole gesture: a press on a choice picks **and**
+  commits it, a press anywhere else dismisses the box. The matching `MouseUp` is then swallowed via
+  `_swallowMouseUp`, otherwise dismissing the picker by clicking away would land as a second click on
+  the view underneath and focus or toggle whatever sat there. Wheel and drag are ignored while it is
+  up, so the box cannot scroll away from its own geometry.
+- `MouseUp` that is a plain click (existing click-vs-drag rule) in the detail view looks up an element
+  whose `ContentLine` matches. A click anywhere on a checkbox line focuses it; a click on the mark
+  glyph (or the cell beside it, per `IsGlyphHit`) also toggles it. The glyph column is found as the
+  line's first non-space character, so nested subtasks work without hard-coding an indent.
 - Drag-to-copy is unchanged whenever the picker is closed.
+
+Overlay hit-testing needs a **second, unclamped** screen-to-content mapping. `MapToContent` clamps the
+column to the covered line's length, which would report a click beside a short line as landing before
+an overlay that visually covers it. `DetailCell` returns the true column; `MapToContent` is now a thin
+clamping wrapper over it, so there is still one place that knows the panel's border offsets.
 
 ### Footer
 
-The detail footer gains `Tab focus · Space tick` hints when editing is enabled, `[grey]read-only[/]`
-when it is not, and reuses the existing transient-toast slot for edit outcomes
-(`✔ ticked`, `⚠ file changed on disk`, `⚠ read-only file`).
+`DetailKeyHints(focused, pickerOpen, editing, mouse)` builds the hint strip, so the next useful key is
+always on screen rather than something the user has to already know:
+
+| State | Hints |
+| --- | --- |
+| Nothing focused | `↑↓ scroll · Tab focus · Esc back · Q quit` |
+| Checkbox focused | `… Tab focus · Space tick · Esc back …` |
+| Status focused | `… Tab focus · Space status · Esc back …` |
+| Picker open | `↑↓ pick · Enter set · Esc cancel` (nothing else, since every key is swallowed) |
+| Editing disabled | `↑↓ scroll · Esc back · Q quit` |
+
+The toast slot is shared with the existing copy message rather than duplicated: `_copyToast` becomes
+`_toast` and now holds **pre-styled markup** so success and failure can differ (`✔ ticked` in green,
+`⚠ file changed on disk` in amber). The old `mouse &&` guard on the toast is dropped, since edit
+outcomes matter on a keyboard-only terminal too.
 
 ## 4. Applying an edit
 
