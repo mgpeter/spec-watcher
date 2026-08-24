@@ -10,7 +10,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
 
     <!-- Overridable at publish time via -p:Version=X.Y.Z (CI derives it from the git tag). -->
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
 
     <!-- Distribution metadata (surfaced in the exe + winget). -->
     <Product>spec-watcher</Product>

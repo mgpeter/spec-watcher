@@ -2,7 +2,7 @@
 # Source-of-truth template. Hashes/URLs are filled per release; the automated pipeline
 # (or a manual komac/wingetcreate run for v1.0.0) submits the real values to winget-pkgs.
 PackageIdentifier: UsualExpat.SpecWatcher
-PackageVersion: 1.0.0
+PackageVersion: 1.1.0
 DefaultLocale: en-US
 ManifestType: version
 ManifestVersion: 1.9.0
