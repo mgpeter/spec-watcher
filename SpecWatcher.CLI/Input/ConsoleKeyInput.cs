@@ -4,7 +4,7 @@ namespace SpecWatcher.Input;
 
 /// <summary>
 /// Keyboard-only input source using blocking <see cref="Console.ReadKey(bool)"/> on a background
-/// thread. Used on non-Windows platforms or when the native mouse path is unavailable.
+/// thread. Used when input is redirected or the native mouse path is unavailable.
 /// </summary>
 public sealed class ConsoleKeyInput : IInputSource
 {

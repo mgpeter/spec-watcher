@@ -10,8 +10,8 @@ namespace SpecWatcher.Tests;
 /// spec, tab to an element, act on it, and check both what landed in the file and what the board now
 /// shows. This is the only place the instance wiring (keys → editor → re-parse → publish) is tested.
 ///
-/// No console is involved: the viewport helpers fall back to a default size when
-/// <see cref="Console.WindowHeight"/> is unavailable, which is exactly the headless-test case.
+/// No console is involved: the viewport is pinned to 120x30 so hit-testing does not depend on the
+/// size the test host happens to report.
 /// </summary>
 public class InlineEditingEndToEndTests : IDisposable
 {
@@ -43,7 +43,7 @@ public class InlineEditingEndToEndTests : IDisposable
     /// <summary>A command with the detail view already open on the fixture spec.</summary>
     private (WatchCommand Command, ScanResult Data) Open(bool readOnly = false)
     {
-        var command = new WatchCommand();
+        var command = new WatchCommand { ViewportOverride = (120, 30) };
         command.ApplySettings(Settings(readOnly));
 
         var row = SpecParser.Parse(_specDir);

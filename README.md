@@ -115,11 +115,14 @@ consumes, so it will only ever change additively.
 | `Esc` / `Backspace` / `←`| Back to the list                |
 | `Q`                      | Quit                            |
 
-Mouse (wheel + click) is supported on Windows (Windows Terminal / conhost). A **left-drag** selects
-text and copies it to the clipboard automatically on release (a plain click still opens the row) —
-most useful in the detail view. The highlight clears on the next key press or scroll. On other
-platforms, or when input is redirected, the app runs keyboard-only and your terminal's own
-drag-to-select handles copying.
+Mouse (wheel + click + drag) works on Windows (Windows Terminal / conhost) and in macOS and Linux
+terminals that support xterm mouse reporting (Ghostty, iTerm2, Terminal.app, kitty, WezTerm, tmux).
+A **left-drag** selects text and copies it to the clipboard automatically on release (a plain click
+still opens the row), which is most useful in the detail view. The highlight clears on the next key
+press or scroll. On macOS the copy goes through `pbcopy`; elsewhere it uses the terminal's OSC 52
+clipboard sequence (in tmux, enable `set-clipboard on`). Because the app owns the mouse, use your
+terminal's bypass modifier (usually **Shift**-drag) for a native selection. When input is redirected
+the app runs keyboard-only.
 
 ## How it reads a spec
 
@@ -139,6 +142,8 @@ drag-to-select handles copying.
 - Full-screen uses the terminal's alternate screen buffer and restores it on exit.
 - On Windows, the console input mode is switched to deliver mouse events (QuickEdit is temporarily
   disabled) and restored on exit.
+- On macOS and Linux, the tty is put into raw mode with `stty` and mouse reporting is switched on;
+  both are restored on exit, including after Ctrl+C.
 - When output is piped or the terminal is non-interactive, it takes the headless path (a single
   static table by default) and exits — see [Headless & CI mode](#headless--ci-mode).
 
@@ -154,6 +159,6 @@ SpecWatcher.CLI/            # the SpecWatcher.Console project
   SpecScanner.cs           # Enumerate + parse spec folders (off-thread)
   SpecParser.cs            # Pure parsing of spec.md / spec-lite.md / tasks.md
   Models.cs                # SpecRow, SpecStatus, ScanResult, SpecDetail (immutable)
-  Input/                   # IInputSource: Windows ReadConsoleInput (keys+mouse) + ReadKey fallback
+  Input/                   # IInputSource: Windows ReadConsoleInput, Unix raw tty + ANSI/SGR mouse parser, ReadKey fallback
 docs/product/              # Mission, tech stack, roadmap, decisions
 ```

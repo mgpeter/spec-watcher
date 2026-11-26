@@ -13,20 +13,21 @@ public interface IInputSource : IDisposable
     bool SupportsMouse { get; }
 
     /// <summary>
-    /// Pick the best available input source: full keyboard+mouse on a real Windows console,
-    /// otherwise a keyboard-only fallback (which is also used when input is redirected).
+    /// Pick the best available input source: full keyboard+mouse on a real Windows console or a
+    /// macOS/Linux terminal, otherwise a keyboard-only fallback (also used when input is redirected).
     /// </summary>
     static IInputSource Create()
     {
-        if (OperatingSystem.IsWindows() && !Console.IsInputRedirected)
+        if (!Console.IsInputRedirected)
         {
             try
             {
-                return new WindowsConsoleInput();
+                if (OperatingSystem.IsWindows()) return new WindowsConsoleInput();
+                return new UnixTerminalInput();
             }
             catch
             {
-                // Any interop/console-mode failure → degrade to keyboard-only.
+                // Any interop/console-mode/stty failure → degrade to keyboard-only.
             }
         }
 

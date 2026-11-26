@@ -883,14 +883,22 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         catch (SemaphoreFullException) { /* already pending */ }
     }
 
-    private static int SafeWindowHeight()
+    /// <summary>
+    /// A fixed window size for tests. The real console is no use there: Windows throws without one
+    /// (so the fallback applies), while macOS and Linux report the terminfo default of 80x24.
+    /// </summary>
+    internal (int Width, int Height)? ViewportOverride { get; set; }
+
+    private int SafeWindowHeight()
     {
+        if (ViewportOverride is { } v) return v.Height;
         try { return Math.Max(10, Console.WindowHeight); }
         catch { return 30; }
     }
 
-    private static int SafeWindowWidth()
+    private int SafeWindowWidth()
     {
+        if (ViewportOverride is { } v) return v.Width;
         try { return Math.Max(40, Console.WindowWidth); }
         catch { return 120; }
     }
