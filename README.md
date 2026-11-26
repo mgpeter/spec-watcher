@@ -63,6 +63,7 @@ dotnet build -c Release
 | `-i, --interval`         | `60`                 | Auto-rescan interval in seconds (min 1).      |
 | `--drift-idle-days`      | `0`                  | Flag In-progress specs untouched this many days as idle (`0` = off). |
 | `--no-flags`             | off                  | Hide the drift/idle attention layer.          |
+| `-t, --theme`            | `harbour`            | Colour theme: `harbour`, `paper`, `phosphor` or `ember`. See [Themes](#themes). |
 | `--once`                 | off                  | Scan once, emit the board to stdout, and exit. Never enters the TUI. |
 | `-f, --format`           | `table`              | Output format: `table`, `json`, or `md`. `json`/`md` imply `--once`. |
 | `--fail-on`              | none                 | Comma list of status keywords (`planning`, `in-progress`, `complete`, `unknown`); any matching spec fails the gate (exit `2`). |
@@ -109,6 +110,7 @@ consumes, so it will only ever change additively.
 | **Left-click** a row     | Open that spec                  |
 | **Scroll wheel**         | Move through the list           |
 | `R`                      | Rescan immediately              |
+| `T`                      | Next theme                      |
 | `Q` / `Esc`              | Quit                            |
 
 **Detail view**
@@ -118,6 +120,7 @@ consumes, so it will only ever change additively.
 | `↑` / `↓` / `PgUp` / `PgDn` / **wheel** | Scroll the spec  |
 | **Drag** over text       | Select & auto-copy to clipboard |
 | `Esc` / `Backspace` / `←`| Back to the list                |
+| `T`                      | Next theme                      |
 | `Q`                      | Quit                            |
 
 Mouse (wheel + click + drag) works on Windows (Windows Terminal / conhost) and in macOS and Linux
@@ -152,6 +155,24 @@ the app runs keyboard-only.
 - When output is piped or the terminal is non-interactive, it takes the headless path (a single
   static table by default) and exits — see [Headless & CI mode](#headless--ci-mode).
 
+## Themes
+
+The dashboard comes in four colour themes, all built on the [Usual Expat](https://usualexpat.com)
+palette:
+
+| Theme      | Look                                                  |
+| ---------- | ----------------------------------------------------- |
+| `harbour`  | Dark slate with brand blue. The default.              |
+| `paper`    | Light, navy text on off-white.                        |
+| `phosphor` | Green-screen terminal with amber highlights.          |
+| `ember`    | Brand navy with an orange accent.                     |
+
+Press `T` in the dashboard to switch to the next theme. The choice is saved to
+`~/.config/spec-watcher/config.json` (`$XDG_CONFIG_HOME` is honoured; on Windows it is
+`%APPDATA%\spec-watcher\config.json`) and used next time. `--theme` overrides the saved choice for
+one run. A theme paints its own background, so it looks the same whatever your terminal's colours
+are; terminals without 24-bit colour get the nearest colours they can show.
+
 ## Project layout
 
 ```
@@ -161,6 +182,8 @@ SpecWatcher.CLI/            # the SpecWatcher.Console project
   Program.cs               # CommandApp entry point
   WatchSettings.cs         # CLI args/options + validation
   WatchCommand.cs          # Full-screen TUI: list + detail, nav, mouse, timer scan loop
+  Theme.cs                 # The four colour themes and the background painter
+  UserConfig.cs            # Saved preferences (the theme) in ~/.config/spec-watcher
   SpecScanner.cs           # Enumerate + parse spec folders (off-thread)
   SpecParser.cs            # Pure parsing of spec.md / spec-lite.md / tasks.md
   Models.cs                # SpecRow, SpecStatus, ScanResult, SpecDetail (immutable)

@@ -100,7 +100,7 @@ public class WatchCommandGitLayoutTests
 
     private static string StripGrey(string markup)
     {
-        const string open = "[grey62]";
+        var open = $"[{Theme.Current.Muted}]";
         const string close = "[/]";
         var s = markup;
         if (s.StartsWith(open)) s = s[open.Length..];

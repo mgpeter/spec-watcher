@@ -65,6 +65,10 @@ public sealed class WatchSettings : CommandSettings
     [Description("0–100; any spec with tasks below N% complete fails the gate (exit 2).")]
     public int? MinProgress { get; init; }
 
+    [CommandOption("-t|--theme <THEME>")]
+    [Description("Colour theme: harbour (default), paper, phosphor or ember. Press T in the dashboard to switch; the choice is remembered.")]
+    public string? Theme { get; init; }
+
     /// <summary>The absolute specs directory (SpecsPath may itself be absolute).</summary>
     public string ResolvedSpecsDir =>
         Path.GetFullPath(Path.IsPathRooted(SpecsPath) ? SpecsPath : Path.Combine(RepoPath, SpecsPath));
@@ -103,6 +107,8 @@ public sealed class WatchSettings : CommandSettings
             return ValidationResult.Error($"Repo path not found: {RepoPath}");
         if (ParseFormat(Format) is null)
             return ValidationResult.Error("--format must be table, json, or md.");
+        if (Theme is not null && SpecWatcher.Theme.Find(Theme) is null)
+            return ValidationResult.Error($"--theme must be one of: {SpecWatcher.Theme.KeyList}.");
         if (MinProgress is { } mp && mp is < 0 or > 100)
             return ValidationResult.Error("--min-progress must be between 0 and 100.");
         if (!string.IsNullOrWhiteSpace(FailOn))

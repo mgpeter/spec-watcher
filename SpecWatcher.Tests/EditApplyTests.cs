@@ -44,7 +44,7 @@ public class EditApplyTests
         var toast = WatchCommand.EditToastMarkup(EditResult.Ok, "ticked");
 
         Assert.Contains("ticked", toast);
-        Assert.Contains("green", toast);
+        Assert.Contains(Theme.Current.Complete, toast);
     }
 
     [Fact]

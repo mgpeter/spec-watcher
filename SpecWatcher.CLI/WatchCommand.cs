@@ -79,6 +79,9 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
 
     private enum View { List, Detail }
 
+    /// <summary>The colours every builder below draws with.</summary>
+    private static Theme Palette => Theme.Current;
+
     private ScanResult _latest = ScanResult.Empty;          // published via Volatile.Write/Read
     private volatile bool _isScanning;
     private volatile bool _running = true;
@@ -126,6 +129,9 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     // narrow read-only window onto the UI state is exposed rather than duplicating the logic in a
     // test double. Nothing here is used by the app itself.
 
+    /// <summary>Where the T key saves the theme; null to not save. Tests point it at a temp file.</summary>
+    internal string? ConfigPath { get; set; } = UserConfig.DefaultPath;
+
     internal ScanResult Latest => Volatile.Read(ref _latest);
     internal bool InDetailView => _view == View.Detail;
     internal bool Running => _running;
@@ -160,6 +166,8 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
             return HeadlessRunner.Run(settings, result, Console.Out);
         }
 
+        Theme.Current = ResolveTheme(settings.Theme, ConfigPath is null ? null : UserConfig.LoadTheme(ConfigPath));
+
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
         {
@@ -171,7 +179,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         using var input = IInputSource.Create();
         var layout = BuildLayout();
 
-        void RunUi() => AnsiConsole.Live(layout)
+        void RunUi() => AnsiConsole.Live(new ThemedSurface(layout))
             .AutoClear(false)
             .Overflow(VerticalOverflow.Crop)
             .Start(live =>
@@ -202,6 +210,26 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         return 0;
     }
 
+    /// <summary>The startup theme: <c>--theme</c> wins, then the saved choice, then the default.</summary>
+    internal static Theme ResolveTheme(string? flag, string? saved) =>
+        Theme.Find(flag) ?? Theme.Find(saved) ?? Theme.Default;
+
+    /// <summary>Move to the next theme, redraw the detail document in it and remember the choice.</summary>
+    private void CycleTheme()
+    {
+        Theme.Current = Palette.Next();
+        if (_detailRow is { } row)
+        {
+            // The detail document is styled once when opened, so restyle it; keep focus and scroll.
+            var (focus, scroll) = (_focusIndex, _detailScroll);
+            LoadDetailDocument(row);
+            _focusIndex = focus < _detailElements.Length ? focus : -1;
+            _detailScroll = scroll;
+        }
+        if (ConfigPath is { } path) UserConfig.SaveTheme(path, Palette.Key);
+        ShowToast($"[{Palette.Accent}]theme: {Palette.Name}[/]");
+    }
+
     // ---- input handling --------------------------------------------------
 
     internal void HandleInput(InputEvent evt, ScanResult data)
@@ -215,6 +243,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
                 // Attention layer: `!` jumps between flagged rows, `F` toggles the whole layer.
                 if (evt.KeyChar == '!') { if (_view == View.List) JumpToNextFlagged(data); break; }
                 if (evt.Key == ConsoleKey.F) { _flagsVisible = !_flagsVisible; break; }
+                if (evt.Key == ConsoleKey.T) { CycleTheme(); break; }
                 if (_view == View.List) HandleListKey(evt.Key, data);
                 else HandleDetailKey(evt.Key, evt.Shift, data);
                 break;
@@ -425,7 +454,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     /// <summary>Style the focused element's line. Banded rather than prefixed, so the visible column
     /// count still matches <see cref="_detailPlain"/> and drag-selection maths stays correct.
     /// A different band colour to the drag selection, so both can be on screen at once.</summary>
-    internal static string FocusLine(string plain) => $"[black on deepskyblue1]{Markup.Escape(plain)}[/]";
+    internal static string FocusLine(string plain) => $"[{Palette.FocusStyle}]{Markup.Escape(plain)}[/]";
 
     private void MoveFocus(int delta)
     {
@@ -478,12 +507,12 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     /// <summary>Footer message for a write attempt, already styled.</summary>
     internal static string EditToastMarkup(EditResult result, string okText) => result switch
     {
-        EditResult.Ok => $"[green]✔ {Markup.Escape(okText)}[/]",
-        EditResult.Conflict => "[orange1]⚠ file changed on disk[/]",
-        EditResult.Unwritable => "[orange1]⚠ read-only file[/]",
-        EditResult.NotFound => "[orange1]⚠ file missing[/]",
-        EditResult.NoStatusLine => "[orange1]⚠ no Status: line in spec.md[/]",
-        _ => "[orange1]⚠ edit failed[/]",
+        EditResult.Ok => $"[{Palette.Complete}]✔ {Markup.Escape(okText)}[/]",
+        EditResult.Conflict => $"[{Palette.Warn}]⚠ file changed on disk[/]",
+        EditResult.Unwritable => $"[{Palette.Warn}]⚠ read-only file[/]",
+        EditResult.NotFound => $"[{Palette.Warn}]⚠ file missing[/]",
+        EditResult.NoStatusLine => $"[{Palette.Warn}]⚠ no Status: line in spec.md[/]",
+        _ => $"[{Palette.Warn}]⚠ edit failed[/]",
     };
 
     /// <summary>Replace a spec in the board by path, leaving the rest of the rows untouched.</summary>
@@ -724,8 +753,8 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     /// <summary>Attention glyph (styled markup + plain, both exactly <see cref="FlagW"/> wide) for a row.</summary>
     internal static (string Markup, string Plain) FlagField(DriftState state) => state switch
     {
-        DriftState.Overstated or DriftState.Understated => ("[yellow]⚠[/]", "⚠"),
-        DriftState.Idle => ("[grey]◍[/]", "◍"),
+        DriftState.Overstated or DriftState.Understated => ($"[{Palette.Warn}]⚠[/]", "⚠"),
+        DriftState.Idle => ($"[{Palette.Muted}]◍[/]", "◍"),
         _ => (" ", " "),
     };
 
@@ -759,7 +788,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     {
         var reason = ReasonOf(row);
         if (string.IsNullOrEmpty(reason)) return "";
-        return $"   {FlagField(row.Drift).Markup} [grey]{Markup.Escape(reason)}[/]";
+        return $"   {FlagField(row.Drift).Markup} [{Palette.Muted}]{Markup.Escape(reason)}[/]";
     }
 
     // ---- mouse text selection -------------------------------------------
@@ -796,7 +825,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     {
         if (to <= from) return Markup.Escape(plain);
         return Markup.Escape(plain[..from]) +
-               $"[black on grey62]{Markup.Escape(plain[from..to])}[/]" +
+               $"[{Palette.DragStyle}]{Markup.Escape(plain[from..to])}[/]" +
                Markup.Escape(plain[to..]);
     }
 
@@ -861,7 +890,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
 
         var text = sb.ToString();
         if (SystemClipboard.TryCopy(text))
-            ShowToast($"[green]✔ copied {text.Length} char{(text.Length == 1 ? "" : "s")}[/]");
+            ShowToast($"[{Palette.Complete}]✔ copied {text.Length} char{(text.Length == 1 ? "" : "s")}[/]");
     }
 
     private void ClampSelection(ScanResult data)
@@ -964,33 +993,33 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     {
         string state;
         if (r.Error is { } err)
-            state = $"[red]✖ {Markup.Escape(err)}[/]";
+            state = $"[{Palette.Error}]✖ {Markup.Escape(err)}[/]";
         else if (_isScanning)
-            state = $"[yellow]{Spinner[frame % Spinner.Length]} scanning…[/]";
+            state = $"[{Palette.Progress}]{Spinner[frame % Spinner.Length]} scanning…[/]";
         else if (r.CompletedAt == DateTimeOffset.MinValue)
-            state = "[grey]starting…[/]";
+            state = $"[{Palette.Muted}]starting…[/]";
         else
         {
-            var updated = $"[grey]updated {r.CompletedAt.LocalDateTime:HH:mm:ss}[/]";
+            var updated = $"[{Palette.Muted}]updated {r.CompletedAt.LocalDateTime:HH:mm:ss}[/]";
             var nextTicks = Volatile.Read(ref _nextScanAtTicks);
             if (nextTicks > 0)
             {
                 var secs = (int)Math.Ceiling((new DateTimeOffset(nextTicks, TimeSpan.Zero) - DateTimeOffset.UtcNow).TotalSeconds);
-                updated += $" [grey]· next in {Math.Max(0, secs)}s[/]";
+                updated += $" [{Palette.Muted}]· next in {Math.Max(0, secs)}s[/]";
             }
             state = updated;
         }
 
         var where = _view == View.Detail && _detailRow is { } d
-            ? $"[grey]{Markup.Escape(d.Folder)}[/]"
-            : $"[grey]{Markup.Escape(s.ResolvedSpecsDir)}[/]";
+            ? $"[{Palette.Muted}]{Markup.Escape(d.Folder)}[/]"
+            : $"[{Palette.Muted}]{Markup.Escape(s.ResolvedSpecsDir)}[/]";
 
         var branch = r.GitAvailable && r.CurrentBranch is { } b
-            ? $"   [grey]on[/] [gold1]◈ {Markup.Escape(b)}[/]"
+            ? $"   [{Palette.Muted}]on[/] [{Palette.Highlight}]◈ {Markup.Escape(b)}[/]"
             : "";
 
-        return new Panel(new Markup($"[bold cyan]spec-watcher[/]  {where}   {state}{branch}"))
-            .Expand().Border(BoxBorder.Rounded).BorderColor(Color.Blue);
+        return new Panel(new Markup($"[bold {Palette.Accent}]spec-watcher[/]  {where}   {state}{branch}"))
+            .Expand().Border(BoxBorder.Rounded).BorderColor(Palette.AccentColor);
     }
 
     // The list is rendered as fixed-width, single-line rows (one screen line per spec) so that
@@ -1005,7 +1034,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         if (r.Rows.IsDefaultOrEmpty)
         {
             var msg = r.Error is null ? "no specs found" : "scan error";
-            lines.Add($"  [grey italic]{Markup.Escape(msg)}[/]");
+            lines.Add($"  [italic {Palette.Muted}]{Markup.Escape(msg)}[/]");
         }
         else
         {
@@ -1054,22 +1083,22 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
             Pad("PROGRESS", ProgressW) + " " +
             (showCommit ? Pad("LAST COMMIT", LastCommitW) + " " : "") +
             Pad("FOLDER", FolderW);
-        return $"[grey62]{Markup.Escape(text)}[/]";
+        return $"[{Palette.Muted}]{Markup.Escape(text)}[/]";
     }
 
     private static string RowLine(SpecRow row, bool selected, int nameW, bool flagsVisible, bool showCommit)
     {
         var caret = CaretMarkup(row, selected);
         var flag = flagsVisible ? FlagField(row.Drift).Markup + " " : "";
-        var name = (selected ? "[bold white]" : "[grey85]") + Markup.Escape(Pad(row.Name, nameW)) + "[/]";
+        var name = (selected ? $"[bold {Palette.Text}]" : $"[{Palette.Text}]") + Markup.Escape(Pad(row.Name, nameW)) + "[/]";
         var status = StatusColor(row.Status) + Markup.Escape(Pad(StatusText(row), StatusW)) + "[/]";
         var (progMarkup, progPlain) = ProgressField(row);
         var prog = progPlain.Length < ProgressW ? progMarkup + new string(' ', ProgressW - progPlain.Length) : progMarkup;
-        var commit = showCommit ? "[grey]" + Markup.Escape(Pad(LastCommitText(row), LastCommitW)) + "[/] " : "";
-        var folder = "[grey42]" + Markup.Escape(Pad(row.Folder, FolderW)) + "[/]";
+        var commit = showCommit ? $"[{Palette.Muted}]" + Markup.Escape(Pad(LastCommitText(row), LastCommitW)) + "[/] " : "";
+        var folder = $"[{Palette.Faint}]" + Markup.Escape(Pad(row.Folder, FolderW)) + "[/]";
 
         var line = $"{caret} {flag}{name} {status} {prog} {commit}{folder}";
-        return selected ? $"[on grey23]{line}[/]" : line;
+        return selected ? $"[on {Palette.Selection}]{line}[/]" : line;
     }
 
     /// <summary>Plain visible text of a list row, mirroring <see cref="RowLine"/>'s exact column layout.</summary>
@@ -1087,7 +1116,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     // takes precedence as a distinct accent glyph; a merely-selected row still shows `❯` and is also
     // lit by the row-background highlight in RowLine, so no selection cue is lost.
     private static string CaretMarkup(SpecRow row, bool selected) =>
-        row.IsCurrent ? "[gold1]◈[/]" : selected ? "[aqua]❯[/]" : " ";
+        row.IsCurrent ? $"[{Palette.Highlight}]◈[/]" : selected ? $"[{Palette.Accent}]❯[/]" : " ";
 
     private static string CaretPlain(SpecRow row, bool selected) =>
         row.IsCurrent ? "◈" : selected ? "❯" : " ";
@@ -1118,27 +1147,27 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
 
     private static string StatusColor(SpecStatus status) => status switch
     {
-        SpecStatus.Planning => "[yellow]",
-        SpecStatus.InProgress => "[deepskyblue1]",
-        SpecStatus.Complete => "[green]",
-        _ => "[grey]",
+        SpecStatus.Planning => $"[{Palette.Planning}]",
+        SpecStatus.InProgress => $"[{Palette.Progress}]",
+        SpecStatus.Complete => $"[{Palette.Complete}]",
+        _ => $"[{Palette.Muted}]",
     };
 
     /// <summary>Progress bar + percentage + counts as both styled markup and its plain visible text.</summary>
     private static (string Markup, string Plain) ProgressField(SpecRow row)
     {
         if (!row.HasTasks || row.Total == 0)
-            return ("[grey]—[/]", "—");
+            return ($"[{Palette.Muted}]—[/]", "—");
 
         const int barWidth = 10;
         var pct = row.Progress ?? 0;
         var filled = Math.Min(barWidth, (int)Math.Round(pct * barWidth));
-        var colour = pct >= 1.0 ? "green" : pct > 0 ? "deepskyblue1" : "grey";
+        var colour = pct >= 1.0 ? Palette.Complete : pct > 0 ? Palette.Progress : Palette.Muted;
         var barPlain = new string('▓', filled) + new string('░', barWidth - filled);
-        var bar = $"[{colour}]{new string('▓', filled)}[/][grey27]{new string('░', barWidth - filled)}[/]";
+        var bar = $"[{colour}]{new string('▓', filled)}[/][{Palette.Line}]{new string('░', barWidth - filled)}[/]";
         var pctText = $"{(int)Math.Round(pct * 100)}%";
         var counts = $"{row.Done}/{row.Total}";
-        return ($"{bar} [grey]{pctText} {counts}[/]", $"{barPlain} {pctText} {counts}");
+        return ($"{bar} [{Palette.Muted}]{pctText} {counts}[/]", $"{barPlain} {pctText} {counts}");
     }
 
     /// <summary>Truncate (with … ) or right-pad raw text to an exact visible width.</summary>
@@ -1182,11 +1211,11 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         if (_pickerOpen) OverlayPicker(visibleLines, start);
         var body = new Markup(string.Join('\n', visibleLines));
 
-        var title = _detailRow is { } d ? $"[bold]{Markup.Escape(d.Name)}[/]" : "spec";
-        var more = DetailMaxScroll() > 0 ? $"  [grey]({start + 1}-{Math.Min(_detailLines.Length, start + height)}/{_detailLines.Length})[/]" : "";
+        var title = $"[bold {Palette.Text}]{Markup.Escape(_detailRow?.Name ?? "spec")}[/]";
+        var more = DetailMaxScroll() > 0 ? $"  [{Palette.Muted}]({start + 1}-{Math.Min(_detailLines.Length, start + height)}/{_detailLines.Length})[/]" : "";
         return new Panel(body)
             .Header($" {title}{more} ")
-            .Expand().Border(BoxBorder.Rounded).BorderColor(Color.Grey35);
+            .Expand().Border(BoxBorder.Rounded).BorderColor(Palette.LineColor);
     }
 
     /// <summary>
@@ -1204,7 +1233,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
 
             var contentLine = _pickerBox.Top + i;
             var beneath = contentLine < _detailPlain.Length ? _detailPlain[contentLine] : string.Empty;
-            var style = i - 1 == _pickerIndex ? "black on deepskyblue1" : "white on grey19";
+            var style = i - 1 == _pickerIndex ? Palette.FocusStyle : Palette.PickerStyle;
             visibleLines[slot] = Splice(beneath, _pickerBox.Left, rows[i], style);
         }
     }
@@ -1216,25 +1245,25 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
     internal static string DetailKeyHints(DetailElementKind? focused, bool pickerOpen, bool editing, bool mouse)
     {
         if (pickerOpen)
-            return "[bold]↑↓[/] [grey]pick[/]   [bold]Enter[/] [grey]set[/]   [bold]Esc[/] [grey]cancel[/]";
+            return $"[bold]↑↓[/] [{Palette.Muted}]pick[/]   [bold]Enter[/] [{Palette.Muted}]set[/]   [bold]Esc[/] [{Palette.Muted}]cancel[/]";
 
-        var hints = new List<string> { "[bold]↑↓[/] [grey]scroll[/]" };
+        var hints = new List<string> { $"[bold]↑↓[/] [{Palette.Muted}]scroll[/]" };
 
         if (editing)
         {
-            hints.Add("[bold]Tab[/] [grey]focus[/]");
-            if (focused == DetailElementKind.Checkbox) hints.Add("[bold]Space[/] [grey]tick[/]");
-            if (focused == DetailElementKind.Status) hints.Add("[bold]Space[/] [grey]status[/]");
+            hints.Add($"[bold]Tab[/] [{Palette.Muted}]focus[/]");
+            if (focused == DetailElementKind.Checkbox) hints.Add($"[bold]Space[/] [{Palette.Muted}]tick[/]");
+            if (focused == DetailElementKind.Status) hints.Add($"[bold]Space[/] [{Palette.Muted}]status[/]");
         }
 
         else
         {
-            hints.Add("[grey italic]read-only[/]");
+            hints.Add($"[italic {Palette.Muted}]read-only[/]");
         }
 
-        hints.Add("[bold]Esc[/] [grey]back[/]");
-        if (mouse) hints.Add("[grey]wheel · drag-copy[/]");
-        hints.Add("[bold]Q[/] [grey]quit[/]");
+        hints.Add($"[bold]Esc[/] [{Palette.Muted}]back[/]");
+        if (mouse) hints.Add($"[{Palette.Muted}]wheel · drag-copy[/]");
+        hints.Add($"[bold]Q[/] [{Palette.Muted}]quit[/]");
 
         return string.Join("   ", hints);
     }
@@ -1248,11 +1277,11 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         {
             left = _detailRow is { } d
                 ? $"{StatusBadge(d)}   {ProgressCell(d)}{DetailReason(d)}"
-                : "[grey]detail[/]";
+                : $"[{Palette.Muted}]detail[/]";
         }
         else if (r.Rows.IsDefaultOrEmpty)
         {
-            left = "[grey]0 specs[/]";
+            left = $"[{Palette.Muted}]0 specs[/]";
         }
         else
         {
@@ -1261,9 +1290,9 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
             var complete = r.Rows.Count(x => x.Status == SpecStatus.Complete);
             left =
                 $"[bold]{r.Rows.Length}[/] specs   " +
-                $"[yellow]◐ {planning}[/]   [deepskyblue1]● {progress}[/]   [green]✔ {complete}[/]   " +
-                (flagged > 0 ? $"[orange1]⚠ {flagged}[/]   " : "") +
-                $"[grey]{_selectedIndex + 1}/{r.Rows.Length}[/]";
+                $"[{Palette.Planning}]◐ {planning}[/]   [{Palette.Progress}]● {progress}[/]   [{Palette.Complete}]✔ {complete}[/]   " +
+                (flagged > 0 ? $"[{Palette.Warn}]⚠ {flagged}[/]   " : "") +
+                $"[{Palette.Muted}]{_selectedIndex + 1}/{r.Rows.Length}[/]";
         }
 
         string keys;
@@ -1277,24 +1306,24 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         }
         else
         {
-            var mouseHint = mouse ? "[grey] · wheel · drag-copy[/]" : "";
-            var jumpHint = flagged > 0 ? "   [bold]![/] [grey]flagged[/]" : "";
-            keys = $"[bold]↑↓[/] [grey]nav[/]   [bold]Enter[/] [grey]open[/]{jumpHint}{mouseHint}   " +
-                   $"[bold]R[/] [grey]refresh[/]   [bold]Q[/] [grey]quit[/]";
+            var mouseHint = mouse ? $"[{Palette.Muted}] · wheel · drag-copy[/]" : "";
+            var jumpHint = flagged > 0 ? $"   [bold]![/] [{Palette.Muted}]flagged[/]" : "";
+            keys = $"[bold]↑↓[/] [{Palette.Muted}]nav[/]   [bold]Enter[/] [{Palette.Muted}]open[/]{jumpHint}{mouseHint}   " +
+                   $"[bold]T[/] [{Palette.Muted}]theme[/]   [bold]R[/] [{Palette.Muted}]refresh[/]   [bold]Q[/] [{Palette.Muted}]quit[/]";
         }
 
         var grid = new Grid();
         grid.AddColumn(new GridColumn().NoWrap());
         grid.AddColumn(new GridColumn().RightAligned());
         grid.AddRow(new Markup(left), new Markup(keys));
-        return new Panel(grid).Expand().Border(BoxBorder.Rounded).BorderColor(Color.Grey35);
+        return new Panel(grid).Expand().Border(BoxBorder.Rounded).BorderColor(Palette.LineColor);
     }
 
     // ---- static (non-interactive) table ---------------------------------
 
     internal static IRenderable BuildStaticTable(ScanResult r)
     {
-        var table = new Table().Expand().Border(TableBorder.Rounded).BorderColor(Color.Grey35);
+        var table = new Table().Expand().Border(TableBorder.Rounded).BorderColor(Palette.LineColor);
         table.AddColumn(new TableColumn("[bold]Name[/]"));
         table.AddColumn(new TableColumn("[bold]Status[/]").NoWrap());
         table.AddColumn(new TableColumn("[bold]Progress[/]").NoWrap());
@@ -1302,7 +1331,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
 
         if (r.Rows.IsDefaultOrEmpty)
         {
-            table.AddRow("[grey]—[/]", r.Error is null ? "[grey italic]no specs found[/]" : "[red]scan error[/]", "", "");
+            table.AddRow($"[{Palette.Muted}]—[/]", r.Error is null ? $"[italic {Palette.Muted}]no specs found[/]" : $"[{Palette.Error}]scan error[/]", "", "");
             return table;
         }
 
@@ -1311,7 +1340,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
                 new Markup($"[bold]{Markup.Escape(row.Name)}[/]"),
                 new Markup(StatusBadge(row)),
                 new Markup(ProgressCell(row)),
-                new Markup($"[grey42]{Markup.Escape(row.Folder)}[/]"));
+                new Markup($"[{Palette.Faint}]{Markup.Escape(row.Folder)}[/]"));
 
         return table;
     }
@@ -1320,25 +1349,25 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
 
     private static string StatusBadge(SpecRow row) => row.Status switch
     {
-        SpecStatus.Planning => "[yellow]◐ Planning[/]",
-        SpecStatus.InProgress => "[deepskyblue1]● In progress[/]",
-        SpecStatus.Complete => "[green]✔ Complete[/]",
+        SpecStatus.Planning => $"[{Palette.Planning}]◐ Planning[/]",
+        SpecStatus.InProgress => $"[{Palette.Progress}]● In progress[/]",
+        SpecStatus.Complete => $"[{Palette.Complete}]✔ Complete[/]",
         _ => string.IsNullOrWhiteSpace(row.StatusRaw)
-            ? "[grey]· unknown[/]"
-            : $"[grey]? {Markup.Escape(row.StatusRaw)}[/]",
+            ? $"[{Palette.Muted}]· unknown[/]"
+            : $"[{Palette.Muted}]? {Markup.Escape(row.StatusRaw)}[/]",
     };
 
     private static string ProgressCell(SpecRow row)
     {
         if (!row.HasTasks || row.Total == 0)
-            return "[grey]—[/]";
+            return $"[{Palette.Muted}]—[/]";
 
         const int width = 10;
         var pct = row.Progress ?? 0;
         var filled = Math.Min(width, (int)Math.Round(pct * width));
-        var colour = pct >= 1.0 ? "green" : pct > 0 ? "deepskyblue1" : "grey";
-        var bar = $"[{colour}]{new string('▓', filled)}[/][grey27]{new string('░', width - filled)}[/]";
-        return $"{bar} [grey]{(int)Math.Round(pct * 100),3}% {row.Done}/{row.Total}[/]";
+        var colour = pct >= 1.0 ? Palette.Complete : pct > 0 ? Palette.Progress : Palette.Muted;
+        var bar = $"[{colour}]{new string('▓', filled)}[/][{Palette.Line}]{new string('░', width - filled)}[/]";
+        return $"{bar} [{Palette.Muted}]{(int)Math.Round(pct * 100),3}% {row.Done}/{row.Total}[/]";
     }
 
     // ---- detail document build ------------------------------------------
@@ -1361,7 +1390,7 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         void Add(string s, string p) { styled.Add(s); plain.Add(p); }
         void AddMd(string raw) { var (s, p) = StyleMarkdownLine(raw); styled.Add(s); plain.Add(p); }
 
-        Add($"[grey]{Markup.Escape(row.FullPath)}[/]", row.FullPath);
+        Add($"[{Palette.Muted}]{Markup.Escape(row.FullPath)}[/]", row.FullPath);
         Add(string.Empty, string.Empty);
 
         if (detail.SpecText is { } spec)
@@ -1383,11 +1412,11 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         }
         else
         {
-            Add("[grey italic]no spec.md[/]", "no spec.md");
+            Add($"[italic {Palette.Muted}]no spec.md[/]", "no spec.md");
         }
 
         Add(string.Empty, string.Empty);
-        Add("[grey]──────── Tasks ────────[/]", "──────── Tasks ────────");
+        Add($"[{Palette.Muted}]──────── Tasks ────────[/]", "──────── Tasks ────────");
         Add(string.Empty, string.Empty);
 
         if (detail.TasksText is { } tasks)
@@ -1412,14 +1441,14 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
         }
         else
         {
-            Add("[grey italic]no tasks.md[/]", "no tasks.md");
+            Add($"[italic {Palette.Muted}]no tasks.md[/]", "no tasks.md");
         }
 
         // Recent commits (git-aware). Omitted entirely when history has not touched this spec.
         if (!row.RecentCommits.IsDefaultOrEmpty)
         {
             Add(string.Empty, string.Empty);
-            Add("[grey]──────── Recent commits ────────[/]", "──────── Recent commits ────────");
+            Add($"[{Palette.Muted}]──────── Recent commits ────────[/]", "──────── Recent commits ────────");
             Add(string.Empty, string.Empty);
 
             var now = DateTimeOffset.Now;
@@ -1428,8 +1457,8 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
                 var rel = RelativeTime(c.When, now);
                 var plainLine = $"{c.ShortSha}  {rel}  {c.Author} — {c.Subject}";
                 var styledLine =
-                    $"[gold1]{Markup.Escape(c.ShortSha)}[/]  [grey]{Markup.Escape(rel)}[/]  " +
-                    $"[aqua]{Markup.Escape(c.Author)}[/] [grey]—[/] {Markup.Escape(c.Subject)}";
+                    $"[{Palette.Highlight}]{Markup.Escape(c.ShortSha)}[/]  [{Palette.Muted}]{Markup.Escape(rel)}[/]  " +
+                    $"[{Palette.Accent}]{Markup.Escape(c.Author)}[/] [{Palette.Muted}]—[/] {Markup.Escape(c.Subject)}";
                 Add(styledLine, plainLine);
             }
         }
@@ -1452,22 +1481,22 @@ public sealed partial class WatchCommand : AsyncCommand<WatchSettings>
             var indent = checkbox.Groups["indent"].Value;
             var done = checkbox.Groups["mark"].Value is "x" or "X";
             var glyph = done ? "✔" : "○";
-            var box = done ? "[green]✔[/]" : "[grey]○[/]";
+            var box = done ? $"[{Palette.Complete}]✔[/]" : $"[{Palette.Muted}]○[/]";
             var raw2 = checkbox.Groups["text"].Value;
             var text = Markup.Escape(raw2);
-            var styled = done ? $"[grey]{text}[/]" : text;
+            var styled = done ? $"[{Palette.Muted}]{text}[/]" : text;
             return ($"{indent}{box} {styled}", $"{indent}{glyph} {raw2}");
         }
 
         var trimmed = line.TrimStart();
         if (trimmed.StartsWith("### ")) return ($"[bold]{Markup.Escape(trimmed[4..])}[/]", trimmed[4..]);
-        if (trimmed.StartsWith("## ")) return ($"[bold aqua]{Markup.Escape(trimmed[3..])}[/]", trimmed[3..]);
-        if (trimmed.StartsWith("# ")) return ($"[bold underline aqua]{Markup.Escape(trimmed[2..])}[/]", trimmed[2..]);
-        if (trimmed.StartsWith('>')) { var t = trimmed[1..].TrimStart(); return ($"[grey]{Markup.Escape(t)}[/]", t); }
+        if (trimmed.StartsWith("## ")) return ($"[bold {Palette.Accent}]{Markup.Escape(trimmed[3..])}[/]", trimmed[3..]);
+        if (trimmed.StartsWith("# ")) return ($"[bold underline {Palette.Accent}]{Markup.Escape(trimmed[2..])}[/]", trimmed[2..]);
+        if (trimmed.StartsWith('>')) { var t = trimmed[1..].TrimStart(); return ($"[{Palette.Muted}]{Markup.Escape(t)}[/]", t); }
         if (trimmed.StartsWith("- ") || trimmed.StartsWith("* "))
         {
             var indent = line[..(line.Length - trimmed.Length)];
-            return ($"{indent}[grey]•[/] {Markup.Escape(trimmed[2..])}", $"{indent}• {trimmed[2..]}");
+            return ($"{indent}[{Palette.Muted}]•[/] {Markup.Escape(trimmed[2..])}", $"{indent}• {trimmed[2..]}");
         }
         return (Markup.Escape(line), line);
     }

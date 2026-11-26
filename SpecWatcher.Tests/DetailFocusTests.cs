@@ -165,7 +165,7 @@ public class DetailFocusTests
     {
         var styled = WatchCommand.FocusLine("○ a [not] markup");
 
-        Assert.StartsWith("[black on", styled);
+        Assert.StartsWith($"[{Theme.Current.FocusStyle}]", styled);
         Assert.EndsWith("[/]", styled);
         Assert.Contains("[[not]]", styled);          // Spectre escaping, so the text renders literally
     }
