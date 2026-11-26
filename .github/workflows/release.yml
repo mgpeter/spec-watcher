@@ -2,7 +2,8 @@ name: release
 
 # Cutting a release: bump the version, then push a tag `vX.Y.Z`.
 # This builds self-contained single-file binaries, publishes a GitHub Release,
-# and opens/updates the winget-pkgs PR for UsualExpat.SpecWatcher.
+# opens/updates the winget-pkgs PR for UsualExpat.SpecWatcher, and updates the
+# spec-watcher formula in mgpeter/homebrew-tap.
 on:
   push:
     tags:
@@ -48,9 +49,42 @@ jobs:
           path: spec-watcher-*.zip
           if-no-files-found: error
 
+  build-macos:
+    name: build ${{ matrix.rid }}
+    # Built on macOS so the SDK ad-hoc signs the binary; an unsigned arm64 binary is killed on launch.
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        rid: [osx-arm64, osx-x64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Derive version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish ${{ matrix.rid }}
+        run: |
+          dotnet publish SpecWatcher.CLI/SpecWatcher.Console.csproj \
+            -c Release -r ${{ matrix.rid }} --self-contained true \
+            -p:PublishSingleFile=true -p:Version=${{ steps.ver.outputs.version }} \
+            -o publish
+          codesign --verify publish/spec-watcher
+          tar -czf "spec-watcher-${{ steps.ver.outputs.version }}-${{ matrix.rid }}.tar.gz" -C publish spec-watcher
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.rid }}
+          path: spec-watcher-*.tar.gz
+          if-no-files-found: error
+
   release:
     name: github release
-    needs: build
+    needs: [build, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -63,7 +97,9 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/spec-watcher-*.zip
+          files: |
+            dist/spec-watcher-*.zip
+            dist/spec-watcher-*.tar.gz
           generate_release_notes: true
           fail_on_unmatched_files: true
 
@@ -83,3 +119,44 @@ jobs:
           release-tag: ${{ github.ref_name }}
           installers-regex: 'win-(x64|arm64)\.zip$'
           token: ${{ secrets.WINGET_TOKEN }}
+
+  homebrew:
+    name: update homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      # Regenerates Formula/spec-watcher.rb from the release tarballs and pushes it to the tap.
+      # HOMEBREW_TAP_TOKEN: fine-grained PAT with Contents read/write on mgpeter/homebrew-tap only,
+      # stored with packaging/homebrew/set-tap-token.sh.
+      # See docs/publishing-homebrew.md.
+      - uses: actions/checkout@v4
+        with:
+          path: source
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: osx-*
+          merge-multiple: true
+
+      - uses: actions/checkout@v4
+        with:
+          repository: mgpeter/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Write and push the formula
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sha_arm64=$(sha256sum "dist/spec-watcher-${version}-osx-arm64.tar.gz" | cut -d' ' -f1)
+          sha_x64=$(sha256sum "dist/spec-watcher-${version}-osx-x64.tar.gz" | cut -d' ' -f1)
+          mkdir -p tap/Formula
+          source/packaging/homebrew/render-formula.sh "$version" "$sha_arm64" "$sha_x64" \
+            > tap/Formula/spec-watcher.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/spec-watcher.rb
+          git diff --cached --quiet && { echo "Formula unchanged"; exit 0; }
+          git commit -m "Update spec-watcher to ${version}"
+          git push

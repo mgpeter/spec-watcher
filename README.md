@@ -16,12 +16,17 @@ full spec + task checklist.
 ## Install
 
 ```sh
+# Windows
 winget install UsualExpat.SpecWatcher
+
+# macOS (Apple Silicon and Intel)
+brew install mgpeter/tap/spec-watcher
 ```
 
-Installs a self-contained `spec-watcher` command (no .NET runtime required) published by Usual Expat
-Limited. See [docs/publishing-winget.md](docs/publishing-winget.md) for how releases are cut and how
-the winget package is maintained.
+Both install a self-contained `spec-watcher` command (no .NET runtime required) published by Usual
+Expat Limited. See [docs/publishing-winget.md](docs/publishing-winget.md) and
+[docs/publishing-homebrew.md](docs/publishing-homebrew.md) for how releases are cut and how each
+package is maintained.
 
 ## Requirements
 

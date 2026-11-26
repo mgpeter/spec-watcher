@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text;
 using Spectre.Console.Cli;
 using SpecWatcher;
@@ -8,11 +9,15 @@ using SpecWatcher;
 try { Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false); }
 catch { /* no attached console / redirected in a way that rejects it: ignore */ }
 
+// The publish step sets -p:Version from the release tag; drop the "+commit" suffix the SDK appends.
+var version = typeof(WatchCommand).Assembly
+    .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0] ?? "0.0.0";
+
 var app = new CommandApp<WatchCommand>();
 app.Configure(config =>
 {
     config.SetApplicationName("spec-watcher");
-    config.SetApplicationVersion("1.0.0");
+    config.SetApplicationVersion(version);
     config.AddExample("C:\\repos\\personal\\car-tracker");
     config.AddExample(".", "-s", "docs/specs", "-i", "30");
     config.AddExample("--once", "--format", "json");
