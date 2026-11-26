@@ -31,10 +31,21 @@ These require your credentials/accounts and are done once:
 1. **Fork `microsoft/winget-pkgs`** onto the GitHub account that will raise the manifest PRs — your
    personal `mgpeter` account or a dedicated company bot account. (winget-releaser/komac push a branch
    to this fork.)
-2. **Create a classic Personal Access Token** on that same account with the **`public_repo`** scope.
-3. In the `mgpeter/spec-watcher` repo settings → *Secrets and variables → Actions*, add it as
-   **`WINGET_TOKEN`**. (The built-in `GITHUB_TOKEN` cannot push to an external fork, so this PAT is
-   required.)
+2. **Store the token** by running this from the repo root:
+   ```sh
+   packaging/winget/set-winget-token.sh
+   ```
+   It opens the classic token page with the **`public_repo`** and **`workflow`** scopes ticked
+   (`workflow` lets komac sync the fork when upstream has changed its own workflow files), asks you to paste the
+   token with input hidden, checks it with GitHub (including the scope) and stores it as the
+   **`WINGET_TOKEN`** Actions secret. The token never reaches shell history or disk. The built-in
+   `GITHUB_TOKEN` cannot push to an external fork, so this token is required.
+
+When the token expires the `submit to winget` job fails with "GitHub token is invalid" (followed by a
+misleading "package does not exist"). Run the script again, then `gh run rerun <run-id> --failed`.
+A token without `workflow` fails at "Syncing fork with upstream" with "refusing to allow a Personal
+Access Token to create or update workflow". Add the scope on the token's page at
+<https://github.com/settings/tokens> (the token value does not change), then re-run the job.
 
 ## Cut a release
 
