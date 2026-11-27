@@ -20,9 +20,9 @@ jobs:
       matrix:
         rid: [win-x64, win-arm64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
 
@@ -43,7 +43,7 @@ jobs:
           # Zip the single exe so winget's nested-portable install yields a clean `spec-watcher` alias.
           7z a "spec-watcher-${{ steps.ver.outputs.version }}-${{ matrix.rid }}.zip" ./publish/spec-watcher.exe
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.rid }}
           path: spec-watcher-*.zip
@@ -57,9 +57,9 @@ jobs:
       matrix:
         rid: [osx-arm64, osx-x64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
 
@@ -76,7 +76,7 @@ jobs:
           codesign --verify publish/spec-watcher
           tar -czf "spec-watcher-${{ steps.ver.outputs.version }}-${{ matrix.rid }}.tar.gz" -C publish spec-watcher
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.rid }}
           path: spec-watcher-*.tar.gz
@@ -89,13 +89,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/spec-watcher-*.zip
@@ -129,17 +129,17 @@ jobs:
       # HOMEBREW_TAP_TOKEN: fine-grained PAT with Contents read/write on mgpeter/homebrew-tap only,
       # stored with packaging/homebrew/set-tap-token.sh.
       # See docs/publishing-homebrew.md.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: source
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: osx-*
           merge-multiple: true
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: mgpeter/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
